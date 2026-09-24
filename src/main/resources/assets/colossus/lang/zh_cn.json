@@ -1,0 +1,11 @@
+{
+  "entity.colossus.example_colossus": "示例巨像",
+  "entity.colossus.example_sentry": "巨像浮游炮",
+  "item.colossus.example_colossus_spawn_egg": "示例巨像刷怪蛋",
+  "item.colossus.example_colossus_summon": "巨像偶像",
+  "colossus.summon.alive": "巨像仍在世上行走。",
+  "colossus.summon.gate_locked.colossus.example": "仪式尚未准备就绪。",
+  "colossus.first_kill.colossus.example": "新的传说就此写下：%s 首次陨落！",
+  "colossus.arena.return": "契约之地不容背离——你已被带回竞技场。",
+  "itemGroup.colossus": "Colossus 巨像引擎"
+}

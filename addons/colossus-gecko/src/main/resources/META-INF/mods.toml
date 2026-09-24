@@ -1,0 +1,42 @@
+modLoader="javafml"
+loaderVersion="[47,)"
+license="All Rights Reserved"
+
+[[mods]]
+modId="colossus_gecko"
+version="0.1.0"
+displayName="Colossus Gecko - GeckoLib 4 Adapter (optional addon)"
+authors="klze"
+description='''
+GeckoLib4 动画适配层，单独成 jar：colossus 本体**一个 GL 引用都没有**
+（取证结论：实体 implements GeoEntity 是字节码级引用，GL 缺失即 NoClassDefFoundError，
+所以"动画后端可选"只能在**另一个 jar** 里做到，不能在核心里靠开关做到）。
+'''
+
+[[dependencies.colossus_gecko]]
+    modId="forge"
+    mandatory=true
+    versionRange="[47,)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.colossus_gecko]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="[1.20.1,1.21)"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.colossus_gecko]]
+    modId="colossus"
+    mandatory=true
+    versionRange="[0.1.0,)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.colossus_gecko]]
+    modId="geckolib"
+    mandatory=true
+    versionRange="[4.8.0,)"
+    ordering="AFTER"
+    side="BOTH"

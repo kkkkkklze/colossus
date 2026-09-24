@@ -1,0 +1,34 @@
+# eclipse
+bin
+*.launch
+.settings
+.metadata
+.classpath
+.project
+
+# idea
+out
+*.ipr
+*.iws
+*.iml
+.idea
+
+# gradle
+build
+.gradle
+
+# other
+eclipse
+run
+runs
+run-data
+
+# 手写 GameTest 模板必须提交（CI 要用）——逐级解冻
+!run/
+run/*
+!run/gameteststructures
+!run/gameteststructures/**
+
+repo
+# Gradle/Forge 根目录日志（非工程资产）
+logs/

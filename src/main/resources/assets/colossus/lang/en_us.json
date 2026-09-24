@@ -1,0 +1,11 @@
+{
+  "entity.colossus.example_colossus": "Example Colossus",
+  "entity.colossus.example_sentry": "Colossus Sentry",
+  "item.colossus.example_colossus_spawn_egg": "Example Colossus Spawn Egg",
+  "item.colossus.example_colossus_summon": "Effigy of the Colossus",
+  "colossus.summon.alive": "The Colossus already walks this world.",
+  "colossus.summon.gate_locked.colossus.example": "The ritual is not ready yet.",
+  "colossus.first_kill.colossus.example": "A new legend is written: %s has fallen for the first time!",
+  "colossus.arena.return": "The covenant ground holds you — back to the arena.",
+  "itemGroup.colossus": "Colossus"
+}
