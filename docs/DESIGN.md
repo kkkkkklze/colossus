@@ -244,3 +244,20 @@ protected void registerMoves(MoveSetBuilder m) {
 > 核心 jar GL 引用数 **0**（`unzip -l colossus-0.1.0.jar | grep -ci geckolib` → 0）、主门不受影响（build + 39/39 + audit 7 + GameTest 7/7）。
 > **未验（说白）**：运行期表现——本仓库没有 geo/animation/texture 资产，且本机验证口径是 headless（客户端不可操作）；
 > MDG legacy 下 GL 自带的 mclib 能否被正确 remap 也未实测。这两条要等能起真客户端的那一轮，或改用 playtest-bridge 通道。
+
+> 进度（2026-09-24 第十三批·全局进度同步）：✅ **客户端持权威镜像**（总表第 60 条改道后的 1.20.1 形）。
+> 取证的硬约束先落地：**1.20.1 没有 StreamCodec/ByteBufCodecs/CustomPacketPayload**（sources jar 四关键词 0 命中，
+> 那是 1.20.2+），Confluence 的"Codec/StreamCodec 成对 + 包体即状态"不可平移；`SavedData` 也没有变更钩子
+> （全文只有 dirty 布尔，`DimensionDataStorage` 无通知）⇒ 只能在改写点显式推。
+> 实现分三块：**①纯件 `ProgressLedger`**（`encode/decode` 一包 `CompoundTag`，与 `SavedData#save` 共用形状；
+> 解码端硬上限 `MAX_ENTRIES=4096`——**截断+告警而不是抛**，抛在 packet handler 里等于炸连接；
+> 畸形条目跳过不整包作废；`shouldSend` 只认代际号）；**②`BossKillBoard` 加 `revision`**（recordKill 时 ++，且入 SavedData，
+> 让重启后第一 tick 少发一个全表包）+ `snapshot()`；**③驱动 `ProgressSync`**（20t 对账 + `PlayerLoggedInEvent` 补包
+> + `ServerStoppingEvent` 重置基线，对应取证三判据"同值不发 / join 必补 / 换世界不拿旧表"）。
+> 客户端 `ClientProgress` 只读镜像（O(1) 查询给 loot 条件/HUD 用），代际号倒退的迟到包直接丢，`LoggingOut` 清空。
+> 桩：自检 +4（**warn 日志实证了上限与跳过两条路径真的被走到**，不是只断结果）＝43/43；
+> GameTest +1 `progressSnapshotMatchesLiveBoard`（真 SavedData 上断代际号 +1、快照与权威表逐项相等、脏检查两侧都对）＝**8 条**。
+> **未验（说白）**：包的实际投递——headless GameTest 里没有真玩家，`ProgressSync` 的广播与 `ClientProgress.apply`
+> 这条链只能靠纯件与数据侧证，交付/镜像真值要等能连客户端的那轮（或 mock 玩家进 `getPlayerList()` 的通道打通）。
+> 本批还暴露一次自伤：脚本按 index 拼接把 `shield-meter` 桩整段吃掉了，**`gameTestAudit` 从 8 掉到 7 才暴露**——
+> 已按原文补回。教训：改测试文件别用 index 切片，改完必须复数一遍声明数。
