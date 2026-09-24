@@ -388,12 +388,28 @@ public abstract class ColossusBossEntity extends Monster {
 
     // ==================== 招式同步帧（客户端动画读这里） ====================
 
-    /** 惰性构建招式表。 */
+    /**
+     * 惰性构建招式表：Java DSL 为底、datapack 同名覆盖，并按 {@link MoveDataRegistry#revision()}
+     * 决定要不要重建实例（第十四批·表/实例分离）。
+     *
+     * <p>热替换语义（DBE GraphRuntimeReloader 的等价简化）：换表只影响<b>下一次选招</b>；
+     * 正在播的招由 {@code AttackState} 自己持着旧 {@link MoveDef}，帧表不会中途换脸。
+     * registerMoves 只跑一次（DSL 是每实体一次性的），合并则每次换表都做。
+     */
+    @Nullable private java.util.List<MoveDef> javaMoves;
+    private long moveDataRevision = -1L;
+
     public final MoveSet moveSet() {
-        if (this.moveSet == null) {
-            MoveSetBuilder builder = new MoveSetBuilder(this, this.getBossId());
-            this.registerMoves(builder);
-            this.moveSet = builder.build();
+        long rev = com.klze.colossus.move.MoveDataRegistry.revision();
+        if (this.moveSet == null || this.moveDataRevision != rev) {
+            if (this.javaMoves == null) {
+                MoveSetBuilder builder = new MoveSetBuilder(this, this.getBossId());
+                this.registerMoves(builder);
+                this.javaMoves = builder.builtDefs();
+            }
+            this.moveSet = MoveSet.merge(this, this.javaMoves,
+                    com.klze.colossus.move.MoveDataRegistry.defsFor(this.getBossId()));
+            this.moveDataRevision = rev;
         }
         return this.moveSet;
     }

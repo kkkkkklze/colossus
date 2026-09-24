@@ -47,6 +47,21 @@ public final class MoveDef {
         this.frames = frames;
     }
 
+    /**
+     * 数据侧构造入口（datapack/JSON 用；Java DSL 仍走 {@link MoveSetBuilder}）。
+     *
+     * <p>刻意只多一个工厂、不多一套模型：两条路产出<b>同一个不可变 {@code MoveDef}</b>，
+     * 帧执行、选招准入、血条解析全部共用——不出现"JSON 招式少半边能力"的特例。
+     * 校验责任在调用方（{@code MoveCodec} 与 {@code MoveSetBuilder} 各自在登记期把住）。
+     */
+    public static MoveDef of(ResourceLocation id, int duration, int cooldownTicks, int minPhase, int maxPhase,
+                             float range, String animName, ToIntFunction<AttackContext> weightFn,
+                             Predicate<AttackContext> extraCheck, int postAttackInvuln,
+                             List<FrameRunner.Frame<com.klze.colossus.entity.ColossusBossEntity>> frames) {
+        return new MoveDef(id, duration, cooldownTicks, minPhase, maxPhase, range, animName,
+                weightFn, extraCheck, postAttackInvuln, java.util.List.copyOf(frames));
+    }
+
     public ResourceLocation id() { return id; }
     /** 招式总时长（逻辑 tick，不含转场窗口）。 */
     public int duration() { return duration; }

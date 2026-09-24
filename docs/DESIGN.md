@@ -261,3 +261,28 @@ protected void registerMoves(MoveSetBuilder m) {
 > 这条链只能靠纯件与数据侧证，交付/镜像真值要等能连客户端的那轮（或 mock 玩家进 `getPlayerList()` 的通道打通）。
 > 本批还暴露一次自伤：脚本按 index 拼接把 `shield-meter` 桩整段吃掉了，**`gameTestAudit` 从 8 掉到 7 才暴露**——
 > 已按原文补回。教训：改测试文件别用 index 切片，改完必须复数一遍声明数。
+
+> 进度（2026-09-24 第十四批·datapack JSON 招式表）：✅ **v0.3 头号欠账提前落地**，按 v8 报告的七步路线走完。
+> 三条取证裁决都真的起了作用：**①行为留在 Java、数据只给词汇表**（`"type"` 字符串查注册表分派，
+> 无脚本/反射/表达式——全部样本一致，v3 §3c 判过"别引 Rhino"）；**②telegraph 那个技术阻塞点靠封闭 kind 表解开**
+> （JSON 写不出 `Function<Boss,TelegraphZone>`，于是 `zone.kind=circle_ahead` + `effect.kind=damage|freeze`（数组按 `and()` 组合），
+> 由解码器负责把词汇表重建回函数）；**③"一文件多记录、记录自带 key"**（1.20.1 重复 id 抛 `IllegalStateException` 会中止整次扫描）。
+> 落地形：`move.data.MoveCodec`（trigger/zone/effect/requires/weight/frames 六套词汇表 + 字段级错误）、
+> `move.MoveDataRegistry`（**表/实例分离**：只存纯数据 + 代际号，实体按号自建实例；正在播的招继续用旧 `MoveDef`，
+> 下一招才取新表——DBE `GraphRuntimeReloader` 的等价简化）、`move.ColossusMoveSetLoader`
+> （`SimpleJsonResourceReloadListener("colossus/moves")` + 加载事务四步：全程写副本 / 逐条 try-catch 收回执 /
+> 整批 `publish` 原子换表 / **把跳过谁都打进日志**）、`MoveDef.of(...)` 数据侧工厂（**只多一个入口，不多一套模型**，
+> JSON 招与 Java 招产出同一个不可变 `MoveDef`，选招/帧执行/血条解析全共用）。
+> 寻址只留一条规则：`data/<任意包>/colossus/moves/<bossNs>/<bossPath>.json` → Boss `<bossNs>:<bossPath>`
+> （刻意不用"包命名空间当 Boss 命名空间"——整合包作者改的恰恰是别人的 Boss）；合并语义=**datapack 同名覆盖 Java 并打日志**。
+> 顺带删掉一条多余路径：原先"ServerStarting 清表 + publish 换表"两件事做同一份职责，
+> 先后顺序一旦反了就是"表被清空"——`publish` 本身是整表替换，`clear()` 随之删除。
+> 桩：自检 +7（解码结构、at/between/repeating 三种帧都活、weight 相加、四类坏数据各带字段名被拒）＝**50/50**；
+> GameTest +1 `datapackMoveLoadsMergesAndHits`（真数据包 → listener → 回执有货 → 与 Java 招合并且互不挤掉 →
+> JSON 招的判定帧真的打伤牛）＝**9 条**，日志实证 `files=1 records=1 applied=1 skipped=0`。
+> 本批红过三次、每次都指向真问题：`weight.base` 把整行对象当成员值取（`requireFloat(row)`）、
+> 非法 id 走 `new ResourceLocation(...)` 抛 `IllegalArgumentException` 冒充"解析炸了"（改 `tryParse`）、
+> 以及上一批那次 index 拼接误删桩——**测试确实在咬**。
+> 边界（如实）：JSON 侧暂不支持 `cue`（其载荷是类型化泛型，先给已有 8 个 trigger 配 codec 已完成）、
+> 不支持 `not_recent`/连招链（语料无先例，要的是 MoveSet 侧新运行时状态，留 v0.3）、
+> `requires` 无嵌套布尔（只有单键与取合取）、无跨包覆写声明式优先级。

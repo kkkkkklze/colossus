@@ -39,6 +39,7 @@ public final class StateSelfTest {
         testRespawnSchedule();
         testDirtyMeter();
         testProgressLedger();
+        testMoveJsonCodec();
         if (failures > 0) {
             System.out.println("SELFTEST FAILED: " + failures + "/" + checks);
             System.exit(1);
@@ -272,6 +273,63 @@ public final class StateSelfTest {
     /** 持续帧（第十批）：窗口内每 period 复触发，出窗即止。 */
     /** 护盾脏检查（第十一批）：钉住"同值不发包 / NaN 不污染 / 补账口子只有一处"三条不变量。 */
     /** 全局进度线上形态（第十三批）：编解码对称 + 硬上限 + 畸形跳过 + 代际号脏检查。 */
+    /** datapack 招式表解码（第十四批）：结构与语义都要对，坏数据必须带字段名被拒。 */
+    private static void testMoveJsonCodec() {
+        String json = "{\"id\":\"quake\",\"duration\":40,\"cooldown\":90,\"phase\":[0,9],"
+                + "\"weight\":[{\"kind\":\"base\",\"base\":3},{\"kind\":\"distance_band\",\"min\":0.0,\"max\":6.0,\"add\":10}],"
+                + "\"frames\":["
+                + "{\"at\":4,\"trigger\":{\"type\":\"colossus:sound\",\"sound\":\"minecraft:entity.generic.explode\"}},"
+                + "{\"between\":[20,24],\"trigger\":{\"type\":\"colossus:circle_hit\",\"radius\":6.0,\"damage\":5.0}},"
+                + "{\"repeating\":[24,36,6],\"trigger\":{\"type\":\"colossus:circle_hit\",\"radius\":6.0,\"damage\":1.0}}]}";
+        var ns = new net.minecraft.resources.ResourceLocation("colossus", "example");
+        com.klze.colossus.move.MoveDef def;
+        try {
+            def = com.klze.colossus.move.data.MoveCodec.decodeMove("quake", ns,
+                    com.google.gson.JsonParser.parseString(json).getAsJsonObject());
+        } catch (Exception e) {
+            check("json move decodes (" + e.getMessage() + ")", false);
+            return;
+        }
+        check("json move keeps id/duration/cooldown",
+                def.id().equals(new net.minecraft.resources.ResourceLocation("colossus", "quake"))
+                        && def.duration() == 40 && def.cooldownTicks() == 90);
+        check("at/between/repeating all survive decoding",
+                def.frames().size() == 3
+                        && def.frames().get(0).from() == 4 && def.frames().get(0).to() == 4
+                        && !def.frames().get(0).repeating()
+                        && def.frames().get(1).from() == 20 && def.frames().get(1).to() == 24
+                        && !def.frames().get(1).repeating()
+                        && def.frames().get(2).repeating() && def.frames().get(2).period() == 6
+                        && def.frames().get(2).from() == 24 && def.frames().get(2).to() == 36);
+        var near = new com.klze.colossus.move.AttackContext(null, null, 25.0); // 距离 5，落在 band 内
+        var far = new com.klze.colossus.move.AttackContext(null, null, 100.0);  // 距离 10，在 band 外
+        check("json weight entries sum additively", def.weight(near) == 13 && def.weight(far) == 3);
+
+        check("bad duration is rejected with its field name",
+                rejects("{\"id\":\"b\",\"duration\":0,\"frames\":[]}", "duration"));
+        check("unknown trigger type is rejected and names what exists",
+                rejects("{\"id\":\"b\",\"duration\":10,\"frames\":[{\"at\":2,"
+                        + "\"trigger\":{\"type\":\"colossus:not_a_thing\"}}]}", "unknown trigger"));
+        check("frame later than duration is rejected at decode time",
+                rejects("{\"id\":\"b\",\"duration\":10,\"frames\":[{\"at\":50,"
+                        + "\"trigger\":{\"type\":\"colossus:event\",\"id\":\"x\"}}]}", "exceeds duration"));
+        check("missing required trigger field is rejected with the field name",
+                rejects("{\"id\":\"b\",\"duration\":10,\"frames\":[{\"at\":2,"
+                        + "\"trigger\":{\"type\":\"colossus:circle_hit\",\"damage\":5.0}}]}", "radius"));
+    }
+
+    private static boolean rejects(String json, String needleInMessage) {
+        try {
+            com.klze.colossus.move.data.MoveCodec.decodeMove("probe",
+                    new net.minecraft.resources.ResourceLocation("colossus", "probe"),
+                    com.google.gson.JsonParser.parseString(json).getAsJsonObject());
+            return false;
+        } catch (Exception e) {
+            String msg = String.valueOf(e.getMessage()).toLowerCase(java.util.Locale.ROOT);
+            return msg.contains(needleInMessage.toLowerCase(java.util.Locale.ROOT));
+        }
+    }
+
     private static void testProgressLedger() {
         java.util.Map<String, Integer> kills = new java.util.LinkedHashMap<>();
         kills.put("colossus:a", 3);

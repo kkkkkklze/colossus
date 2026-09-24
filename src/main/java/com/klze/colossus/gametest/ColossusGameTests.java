@@ -333,6 +333,41 @@ public class ColossusGameTests {
     }
 
     /**
+     * datapack 招式表的真机链（第十四批）：数据包文件 → reload listener → 回执有货
+     * → 合并进 Boss 的 MoveSet（与 Java 招共存且不抢 id）→ JSON 招的判定帧真的落伤。
+     * 自检只能证到"解码对"，这条证的才是"内容作者放个 JSON 就能加招"这件事成立。
+     */
+    @GameTest(template = YARD, timeoutTicks = 200, batch = "json-move")
+    public void datapackMoveLoadsMergesAndHits(GameTestHelper helper) {
+        var report = com.klze.colossus.move.MoveDataRegistry.lastReport();
+        var jsonId = Colossus.res("datapack_quake");
+        helper.assertTrue(report.applied() > 0,
+                "数据包招式表没加载：files=" + report.files() + " records=" + report.records()
+                        + " errors=" + report.errors());
+        boolean inTable = com.klze.colossus.move.MoveDataRegistry.defsFor(Colossus.res("example"))
+                .stream().anyMatch(m -> m.id().equals(jsonId));
+        helper.assertTrue(inTable,
+                "colossus/moves/colossus/example.json 里的 datapack_quake 没进表（回执 errors="
+                        + report.errors() + "）");
+
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        helper.assertTrue(boss.moveSet().byId(jsonId) != null,
+                "JSON 招必须与 Java 招合并进同一张 MoveSet");
+        helper.assertTrue(boss.moveSet().byId(Colossus.res("smash")) != null,
+                "合并不能把 Java 侧原有招式挤掉");
+
+        var cow = helper.spawn(net.minecraft.world.entity.EntityType.COW, new BlockPos(6, 3, 4));
+        float hpBefore = cow.getHealth();
+        helper.assertTrue(boss.forceMove(jsonId), "应能强制出这招 JSON 招");
+        helper.runAfterDelay(30, () -> {
+            helper.assertTrue(cow.getHealth() < hpBefore || cow.isRemoved(),
+                    "JSON 招的判定帧必须真落伤（牛 " + cow.getHealth() + "/" + hpBefore + "）");
+            helper.succeed();
+        });
+    }
+
+    /**
      * 登记期校验回归（审查 P1#3）：坏窗口必须 build 招式表时就抛——
      * 留到出招那 tick 抛＝炸在 serverAiStep 里，持久 Boss 变崩溃循环。
      */

@@ -36,11 +36,18 @@ public final class MoveSetBuilder {
 
     /** 收口：产出不可变招式表。 */
     public MoveSet build() {
+        return new MoveSet(boss, new ArrayList<>(builtDefs()));
+    }
+
+    /**
+     * 只取 DSL 产出的定义列表（datapack 合并路径用——同一套校验，不另开一条无检查的口子）。
+     */
+    public List<MoveDef> builtDefs() {
         if (created != built.size()) {
             throw new IllegalStateException("boss " + bossId + ": " + created
                     + " move(s) started but only " + built.size() + " done() — 有招式忘了 .done()");
         }
-        return new MoveSet(boss, new ArrayList<>(built));
+        return List.copyOf(built);
     }
 
     public MoveBuilder move(String name) {
