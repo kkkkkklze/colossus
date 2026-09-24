@@ -238,16 +238,29 @@ public class ColossusGameTests {
                     "被拒的出招不得推进序号，否则客户端会凭空重启一次动画");
             helper.assertTrue(boss.attackTick() > 0, "帧表应随 tick 推进（attackTick 恒 0＝状态机没跑）");
         });
-        helper.runAfterDelay(45, () -> {
-            helper.assertTrue(boss.currentAttack() == null, "roar(duration 30) 应已结束");
-            int before = boss.attackSequence();
-            helper.assertTrue(boss.forceMove(roar), "招完后应能再次强制出招");
-            helper.assertTrue(boss.attackSequence() == before + 1,
-                    "同招二连的序号必须再 +1——这就是动画重启的唯一判据");
-            helper.assertTrue(roar.equals(boss.currentAttack().id()),
-                    "而招式身份不变——正说明「只有序号能区分两次施法」");
-            helper.succeed();
-        });
+        // 第二次施法：等到 Boss 真的空下来（它会自己选招——射程内有别的结构的实体当目标，
+        // 所以"固定时刻必然空闲"这种前提是错的，改成轮询到有结果为止）
+        class Retry {
+            int attempts = 0;
+
+            void run() {
+                if (boss.forceMove(roar)) {
+                    helper.assertTrue(boss.attackSequence() == s0 + 2,
+                            "同招二连的序号必须再 +1（这是动画重启的唯一判据），实际 "
+                                    + boss.attackSequence());
+                    helper.assertTrue(roar.equals(boss.currentAttack().id()),
+                            "而招式身份不变——正说明「只有序号能区分两次施法」");
+                    helper.succeed();
+                    return;
+                }
+                if (++attempts > 40) {
+                    helper.fail("轮询 400t 仍没能再次强制出招：Boss 卡在非空闲状态或闸门失效");
+                    return;
+                }
+                helper.runAfterDelay(10, this::run);
+            }
+        }
+        helper.runAfterDelay(40, () -> new Retry().run());
     }
 
     /**
@@ -287,6 +300,36 @@ public class ColossusGameTests {
             helper.assertTrue(boss.isAlive() && !boss.isDeathPending(), "这一刀不该致死");
             helper.succeed();
         });
+    }
+
+    /**
+     * 全局进度快照回归（第十三批）：真 SavedData 上走一次 recordKill，
+     * 断言代际号 +1、快照编解码与权威表逐项相等、脏检查两侧都对。
+     * 症状对照：包发了但镜像是旧的（encode/decode 不对称）、
+     * 或"同值也发"（shouldSend 反了 → 每 20t 全员重播全表）。
+     */
+    @GameTest(template = YARD, timeoutTicks = 100, batch = "progress-sync")
+    public void progressSnapshotMatchesLiveBoard(GameTestHelper helper) {
+        var board = BossKillBoard.get(helper.getLevel());
+        long revBefore = board.revision();
+        var probe = Colossus.res("gametest_probe_boss");
+
+        board.recordKill(probe);
+        helper.assertTrue(board.revision() == revBefore + 1,
+                "recordKill 必须推进代际号，实际 " + board.revision() + "（开局 " + revBefore + "）");
+
+        var decoded = com.klze.colossus.progress.ProgressLedger.decode(board.snapshot());
+        helper.assertTrue(decoded.revision() == board.revision(),
+                "快照代际号必须与权威表一致");
+        helper.assertTrue(decoded.killCount(probe.toString()) == board.killCount(probe),
+                "快照里的击杀数要与权威表相等，实际 " + decoded.killCount(probe.toString()));
+        helper.assertTrue(decoded.isDefeated(probe.toString()), "已击败集合要进快照");
+        helper.assertTrue(com.klze.colossus.progress.ProgressLedger.shouldSend(revBefore, board.revision()),
+                "变化过的代际号该发");
+        helper.assertTrue(!com.klze.colossus.progress.ProgressLedger.shouldSend(
+                        board.revision(), board.revision()),
+                "同值不该发（每 20t 全表重播是点名反面）");
+        helper.succeed();
     }
 
     /**

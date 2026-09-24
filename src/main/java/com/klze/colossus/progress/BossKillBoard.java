@@ -25,6 +25,12 @@ public class BossKillBoard extends SavedData {
     /** key = boss 注册 id 字符串。 */
     private final Map<String, Integer> kills = new HashMap<>();
     private final Set<String> defeated = new HashSet<>();
+    /**
+     * 代际号：每次状态变更 +1，是"该不该给客户端重推快照"的唯一判据
+     * （{@link ProgressLedger#shouldSend}）。不入库也行（重载后从 0 重数），
+     * 但入库能让"服务端重启后第一 tick 就少发一个全表包"——所以入。
+     */
+    private long revision;
 
     public BossKillBoard() {}
 
@@ -44,6 +50,7 @@ public class BossKillBoard extends SavedData {
         for (String k : defTag.getAllKeys()) {
             if (defTag.getBoolean(k)) board.defeated.add(k);
         }
+        board.revision = tag.getLong("revision");
         return board;
     }
 
@@ -55,6 +62,7 @@ public class BossKillBoard extends SavedData {
         CompoundTag defTag = new CompoundTag();
         for (String d : defeated) defTag.putBoolean(d, true);
         tag.put("defeated", defTag);
+        tag.putLong("revision", this.revision);
         return tag;
     }
 
@@ -62,6 +70,7 @@ public class BossKillBoard extends SavedData {
     public boolean recordKill(ResourceLocation bossId) {
         kills.merge(bossId.toString(), 1, Integer::sum);
         boolean first = defeated.add(bossId.toString());
+        this.revision++; // 代际号先走，快照推送才有依据
         setDirty();
         return first;
     }
@@ -69,6 +78,14 @@ public class BossKillBoard extends SavedData {
     public boolean isDefeated(ResourceLocation bossId) { return defeated.contains(bossId.toString()); }
 
     public int killCount(ResourceLocation bossId) { return kills.getOrDefault(bossId.toString(), 0); }
+
+    /** 当前代际号（{@link ProgressLedger#shouldSend} 的右值）。 */
+    public long revision() { return this.revision; }
+
+    /** 出线上快照（一包 CompoundTag；服务端广播与回归桩共用同一形状）。 */
+    public CompoundTag snapshot() {
+        return ProgressLedger.encode(this.revision, this.kills, this.defeated);
+    }
 
     // ---------------- 玩家挑战次数（PersistentData 通道） ----------------
 

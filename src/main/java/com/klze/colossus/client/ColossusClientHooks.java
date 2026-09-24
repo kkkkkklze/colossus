@@ -57,6 +57,7 @@ public final class ColossusClientHooks {
     public static void onLoggedOut(ClientPlayerNetworkEvent.LoggingOut event) {
         BossBarStyles.clear();
         ShieldBars.clear();
+        com.klze.colossus.progress.ClientProgress.clear(); // 镜像不跨世界存活（换单人世界读到上一张表是点名反面）
         BossMusicClient.reset();
         TelegraphClient.clear();
         ScreenShakeClient.clear();

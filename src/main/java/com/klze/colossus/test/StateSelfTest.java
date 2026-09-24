@@ -38,6 +38,7 @@ public final class StateSelfTest {
         testPartStatesBits();
         testRespawnSchedule();
         testDirtyMeter();
+        testProgressLedger();
         if (failures > 0) {
             System.out.println("SELFTEST FAILED: " + failures + "/" + checks);
             System.exit(1);
@@ -270,6 +271,44 @@ public final class StateSelfTest {
 
     /** 持续帧（第十批）：窗口内每 period 复触发，出窗即止。 */
     /** 护盾脏检查（第十一批）：钉住"同值不发包 / NaN 不污染 / 补账口子只有一处"三条不变量。 */
+    /** 全局进度线上形态（第十三批）：编解码对称 + 硬上限 + 畸形跳过 + 代际号脏检查。 */
+    private static void testProgressLedger() {
+        java.util.Map<String, Integer> kills = new java.util.LinkedHashMap<>();
+        kills.put("colossus:a", 3);
+        kills.put("colossus:b", 1);
+        java.util.Set<String> defeated = new java.util.LinkedHashSet<>(java.util.List.of("colossus:a"));
+        var tag = com.klze.colossus.progress.ProgressLedger.encode(42L, kills, defeated);
+        var back = com.klze.colossus.progress.ProgressLedger.decode(tag);
+        check("progress snapshot round-trips revision and counts",
+                back.revision() == 42L && back.killCount("colossus:a") == 3
+                        && back.killCount("colossus:b") == 1 && back.isDefeated("colossus:a")
+                        && !back.isDefeated("colossus:b"));
+
+        // 畸形条目（缺 id 的行）只跳过该条，不整包作废、不抛
+        var rows = (net.minecraft.nbt.ListTag) tag.get("kills");
+        net.minecraft.nbt.CompoundTag broken = new net.minecraft.nbt.CompoundTag();
+        broken.putInt("count", 9);
+        rows.add(broken);
+        var tolerant = com.klze.colossus.progress.ProgressLedger.decode(tag);
+        check("malformed entry is skipped, rest of the package still applies",
+                tolerant.killCount("colossus:a") == 3 && tolerant.killCount("colossus:b") == 1
+                        && tolerant.kills().size() == 2);
+
+        java.util.Map<String, Integer> flood = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < com.klze.colossus.progress.ProgressLedger.MAX_ENTRIES + 50; i++) {
+            flood.put("colossus:f" + i, i);
+        }
+        var capped = com.klze.colossus.progress.ProgressLedger.decode(
+                com.klze.colossus.progress.ProgressLedger.encode(7L, flood, java.util.Set.of()));
+        check("decode-side cap holds against an oversized snapshot",
+                capped.kills().size() <= com.klze.colossus.progress.ProgressLedger.MAX_ENTRIES
+                        && capped.kills().size() > 0);
+
+        check("dirty check: same revision sends nothing, changed sends once",
+                !com.klze.colossus.progress.ProgressLedger.shouldSend(9L, 9L)
+                        && com.klze.colossus.progress.ProgressLedger.shouldSend(-1L, 9L));
+    }
+
     private static void testDirtyMeter() {
         com.klze.colossus.bar.DirtyMeter m = new com.klze.colossus.bar.DirtyMeter();
         int sends = 0;

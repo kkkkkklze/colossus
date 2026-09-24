@@ -1,6 +1,7 @@
 package com.klze.colossus.network;
 
 import com.klze.colossus.Colossus;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -55,6 +56,8 @@ public final class ColossusPackets {
                 CueS2C::encode, CueS2C::decode, CueS2C::handle);
         CHANNEL.registerMessage(index++, BarShieldS2C.class,
                 BarShieldS2C::encode, BarShieldS2C::decode, BarShieldS2C::handle);
+        CHANNEL.registerMessage(index++, ProgressSnapshotS2C.class,
+                ProgressSnapshotS2C::encode, ProgressSnapshotS2C::decode, ProgressSnapshotS2C::handle);
     }
 
     // ---------------- 附加资源条（护盾）旁路 ----------------
@@ -236,5 +239,38 @@ public final class ColossusPackets {
 
     public static void sendToPlayers(java.util.Collection<ServerPlayer> players, Object msg) {
         for (ServerPlayer p : players) sendToPlayer(msg, p);
+    }
+
+    // ---------------- 全局进度快照（第十三批） ----------------
+
+    /**
+     * 一包 {@link CompoundTag} 的进度快照——1.20.1 没有 StreamCodec（v9 取证实测 0 命中），
+     * 所以"包体即状态"用 NBT 实现：服务端 {@code BossKillBoard#snapshot()} 产出什么，这里就发什么，
+     * 两侧共用同一份 tag 形状，不留第二套序列化。
+     */
+    public record ProgressSnapshotS2C(CompoundTag data) {
+        static void encode(ProgressSnapshotS2C msg, FriendlyByteBuf buf) {
+            buf.writeNbt(msg.data);
+        }
+        static ProgressSnapshotS2C decode(FriendlyByteBuf buf) {
+            net.minecraft.nbt.Tag t = buf.readNbt();
+            return new ProgressSnapshotS2C(t instanceof CompoundTag c ? c : new CompoundTag());
+        }
+        static void handle(ProgressSnapshotS2C msg, Supplier<NetworkEvent.Context> ctx) {
+            ctx.get().enqueueWork(() -> com.klze.colossus.progress.ClientProgress
+                    .apply(com.klze.colossus.progress.ProgressLedger.decode(msg.data())));
+            ctx.get().setPacketHandled(true);
+        }
+    }
+
+    /** 广播全量快照给所有在线玩家（代际号变化时才调，见 ProgressSync 的脏检查）。 */
+    public static void broadcastProgress(CompoundTag snapshot) {
+        CHANNEL.send(net.minecraftforge.network.PacketDistributor.ALL.noArg(),
+                new ProgressSnapshotS2C(snapshot));
+    }
+
+    /** 进视角补包：新玩家一进来就要拿到当前真值，不能等下一次变化。 */
+    public static void sendProgressTo(CompoundTag snapshot, ServerPlayer player) {
+        sendToPlayer(new ProgressSnapshotS2C(snapshot), player);
     }
 }
