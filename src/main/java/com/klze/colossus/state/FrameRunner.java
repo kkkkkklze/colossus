@@ -29,24 +29,36 @@ import java.util.function.BiConsumer;
 public final class FrameRunner<C> {
 
     /**
+     * 窗口形态的唯一判据（null=合法）。<b>Java DSL 与 datapack 必须同调这一处</b>——
+     * 轮 6 P2#2：JSON 侧当时只查了 to>=from，`{"between":[9,2]}` 会静默成死帧
+     * （回执 0 错、这招永远没伤害），而 DSL 侧两条都拒。
+     *
+     * @param period 0=一次性帧；持续帧必须 >=1
+     */
+    public static String windowError(int from, int to, int period) {
+        if (from < 1) return "frame " + from + ": frames start at 1";
+        if (to < from) return "window [" + from + "," + to + "]: to < from";
+        // period==0 只表示"不是持续帧"——窗口帧（to>from）同样用 0，这里绝不能反过来禁掉
+        if (period < 0) return "period " + period + ": negative";
+        return null;
+    }
+
+    /**
      * 一帧：[from,to] 窗口 + 周期 + 触发回调（参数 = 上下文 + 触发 tick）。
      * {@code to==from} 即单帧；{@code period>0} 即持续帧（窗口内每 period 触发一次）。
      */
     public record Frame<C>(int from, int to, int period, BiConsumer<C, Integer> action) {
 
-        /** 一次性帧（单帧或窗口帧）。 */
+    /** 一次性帧（单帧或窗口帧）。 */
         public Frame(int from, int to, BiConsumer<C, Integer> action) {
             this(from, to, 0, action);
         }
 
-        /** 持续帧：period 必须 ≥1。 */
+        /** 持续帧：窗口判据同 {@link #windowError}，另加"period 必须 >=1"（这条只属于持续帧）。 */
         public static <C> Frame<C> repeating(int from, int to, int period, BiConsumer<C, Integer> action) {
-            if (period < 1) {
-                throw new IllegalArgumentException("repeating frame needs period >= 1, got " + period);
-            }
-            if (to < from) {
-                throw new IllegalArgumentException("window to < from: " + from + ">" + to);
-            }
+            String bad = windowError(from, to, period);
+            if (bad == null && period < 1) bad = "repeating frame needs period >= 1, got " + period;
+            if (bad != null) throw new IllegalArgumentException(bad);
             return new Frame<>(from, to, period, action);
         }
 

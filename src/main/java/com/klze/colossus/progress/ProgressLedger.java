@@ -32,8 +32,15 @@ public final class ProgressLedger {
     /** 解码端硬上限（条目数）。服务端正常远达不到，这道门防的是坏数据/超大包。 */
     public static final int MAX_ENTRIES = 4096;
 
-    /** 快照 = 代际号 + 击杀数 + 已击败集合。 */
-    public record Snapshot(long revision, Map<String, Integer> kills, Set<String> defeated) {
+    /**
+     * 快照 = 来源身份 + 代际号 + 击杀数 + 已击败集合。
+     *
+     * <p>{@code sourceIdentity} 每次服务端启动随机、由 {@code ProgressSync} 在发送前盖章。
+     * 没有它，"代际号倒退即丢"这条规则是错的：{@code BossKillBoard} 的 revision 是
+     * **每世界一份**，切到一个 revision 更低的存档时，正常快照会被当成"迟到包"整条丢掉，
+     * 而服务端只在变化时发 ⇒ 永不恢复（旧写法把跨世界安全全押在 LoggingOut 一个钩子上）。
+     */
+    public record Snapshot(long sourceIdentity, long revision, Map<String, Integer> kills, Set<String> defeated) {
         public Snapshot {
             kills = Map.copyOf(kills);
             defeated = Set.copyOf(defeated);
@@ -50,8 +57,10 @@ public final class ProgressLedger {
 
     private ProgressLedger() {}
 
-    public static CompoundTag encode(long revision, Map<String, Integer> kills, Set<String> defeated) {
+    public static CompoundTag encode(long sourceIdentity, long revision,
+                                     Map<String, Integer> kills, Set<String> defeated) {
         CompoundTag tag = new CompoundTag();
+        tag.putLong("src", sourceIdentity);
         tag.putLong("rev", revision);
         ListTag killList = new ListTag();
         for (Map.Entry<String, Integer> e : kills.entrySet()) {
@@ -78,7 +87,8 @@ public final class ProgressLedger {
     public static Snapshot decode(CompoundTag tag) {
         Map<String, Integer> kills = new HashMap<>();
         Set<String> defeated = new HashSet<>();
-        if (tag == null) return new Snapshot(-1L, kills, defeated);
+        if (tag == null) return new Snapshot(0L, -1L, kills, defeated);
+        long src = tag.getLong("src");
         long rev = tag.getLong("rev");
 
         if (tag.get("kills") instanceof ListTag killList) {
@@ -109,7 +119,7 @@ public final class ProgressLedger {
                         defList.size(), MAX_ENTRIES);
             }
         }
-        return new Snapshot(rev, kills, defeated);
+        return new Snapshot(src, rev, kills, defeated);
     }
 
     /** 脏检查：代际号没变就一个包都不发（含首帧 lastSent=-1 必发）。 */

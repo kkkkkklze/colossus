@@ -92,8 +92,9 @@ public class ExampleColossusModel extends HierarchicalModel<ExampleColossus> {
         }
 
         // 招式期：抬手砸击姿态（举到 50% 进度后快速挥下）
-        var move = boss.currentAttack();
-        if (move != null && boss.attackTick() > 0) {
+        // 只读同步数据（currentAttack 是服务端权威对象，客户端拿不到也不该拿：
+        // datapack 招式表在多人客户端可能根本没有）
+        if (!boss.attackAnimId().isEmpty() && boss.attackTick() > 0) {
             float p = boss.attackProgress();
             float swing = p < 0.5f ? (p / 0.5f) * -2.4f : (1.0f - (p - 0.5f) / 0.5f) * -2.4f;
             this.rightArm.xRot = swing;

@@ -88,7 +88,10 @@ public final class ColossusMoveSetLoader extends SimpleJsonResourceReloadListene
                     errors.add(file + " 有一条记录不是对象");
                     continue;
                 }
-                String key = mo.has("id") ? mo.get("id").getAsString() : null;
+                // 判 isJsonPrimitive 再取值：getAsString() 在对象/数组上抛 UnsupportedOperationException，
+                // 而它在记录级 try 之前抛＝整次 reload 被打掉（轮6 P2-1，作者写 "id": {} 就能触发）
+                String key = mo.has("id") && mo.get("id").isJsonPrimitive()
+                        ? mo.get("id").getAsString() : null;
                 if (key == null || key.isEmpty()) {
                     errors.add(file + " 有记录缺 id");
                     continue;

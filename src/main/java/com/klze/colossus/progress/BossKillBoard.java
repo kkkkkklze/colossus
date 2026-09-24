@@ -84,7 +84,8 @@ public class BossKillBoard extends SavedData {
 
     /** 出线上快照（一包 CompoundTag；服务端广播与回归桩共用同一形状）。 */
     public CompoundTag snapshot() {
-        return ProgressLedger.encode(this.revision, this.kills, this.defeated);
+        // 身份位留空：它由发送方 ProgressSync 盖章（SavedData 落盘形状里不该掺进程级随机数）
+        return ProgressLedger.encode(0L, this.revision, this.kills, this.defeated);
     }
 
     // ---------------- 玩家挑战次数（PersistentData 通道） ----------------

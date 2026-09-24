@@ -50,14 +50,6 @@ public final class MoveSet {
         return null;
     }
 
-    /** 供同步协议用的稳定索引（注册顺序；仅显示用，持久化一律用 id 字符串）。 */
-    public int indexOf(ResourceLocation id) {
-        for (int i = 0; i < moves.size(); i++) {
-            if (moves.get(i).id().equals(id)) return i;
-        }
-        return -1;
-    }
-
     /** 加权随机选招；全部不可用时返回 empty。cooldownLeft 由实体提供。 */
     public java.util.Optional<MoveDef> pick(AttackContext ctx, ToIntFunction<ResourceLocation> cooldownLeft, RandomSource random) {
         List<MoveDef> pool = new ArrayList<>();

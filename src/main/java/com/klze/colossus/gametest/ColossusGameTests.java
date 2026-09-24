@@ -333,6 +333,30 @@ public class ColossusGameTests {
     }
 
     /**
+     * 广播节律真机桩（轮 6 P2-3 的补口的口的口）：进度变化后<b>恰好广播一次</b>，
+     * 之后静止三轮<b>一次都不再发</b>。判据用广播计数而不是对账基线——
+     * 少了脏检查时基线仍会被反复设成同值，断言挡不住（审查建议的那条本身有洞）。
+     */
+    @GameTest(template = YARD, timeoutTicks = 250, batch = "progress-broadcast")
+    public void progressBroadcastsOncePerChange(GameTestHelper helper) {
+        var board = BossKillBoard.get(helper.getLevel());
+        long base = com.klze.colossus.progress.ProgressSync.broadcastCount();
+        board.recordKill(Colossus.res("gametest_probe_sync"));
+
+        helper.runAfterDelay(30, () -> {
+            long after = com.klze.colossus.progress.ProgressSync.broadcastCount();
+            helper.assertTrue(after == base + 1,
+                    "一次变化应恰好广播一次，实际 +" + (after - base) + "（>=2 即脏检查被拆）");
+            helper.runAfterDelay(80, () -> {
+                long idle = com.klze.colossus.progress.ProgressSync.broadcastCount();
+                helper.assertTrue(idle == after,
+                        "同值期间不得重播全表，又发了 " + (idle - after) + " 次");
+                helper.succeed();
+            });
+        });
+    }
+
+    /**
      * datapack 招式表的真机链（第十四批）：数据包文件 → reload listener → 回执有货
      * → 合并进 Boss 的 MoveSet（与 Java 招共存且不抢 id）→ JSON 招的判定帧真的落伤。
      * 自检只能证到"解码对"，这条证的才是"内容作者放个 JSON 就能加招"这件事成立。

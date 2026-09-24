@@ -80,8 +80,21 @@ public abstract class ColossusBossEntity extends Monster {
 
     private static final EntityDataAccessor<Integer> DATA_PHASE =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT);
-    private static final EntityDataAccessor<Integer> DATA_ATTACK_INDEX =
-            SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT); // -1 = 无招式
+    /**
+     * 当前招式的<b>字符串 id</b>（空串=无招式）。
+     *
+     * <p>这里曾经是 {@code DATA_ATTACK_INDEX}（数组下标）。轮 6 审查把它判死：
+     * datapack 招式表的 {@code AddReloadListenerEvent} 只在服务端 reload 路径派发
+     * （{@code ReloadableServerResources:77} ← {@code MinecraftServer:1323}/{@code WorldLoader:38}），
+     * 多人客户端根本没有那张表——索引在客户端要么越界无招，要么拿<b>上一个单人世界</b>的表反解出错姿态。
+     * 现在协议面只走字符串 id（§0.2 的本意），显示层要什么名字自己解析，解析不到就退化成"无动画"，
+     * 而不是"动画对不上判定"。
+     */
+    private static final EntityDataAccessor<String> DATA_ATTACK_ID =
+            SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.STRING);
+    /** 当前招式时长（同步）。客户端算进度比例不再需要查表——表可能是空的。 */
+    private static final EntityDataAccessor<Integer> DATA_ATTACK_DURATION =
+            SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<Integer> DATA_ATTACK_TICK =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT);
     /**
@@ -92,6 +105,7 @@ public abstract class ColossusBossEntity extends Monster {
      * 这是 GL4 取证（清单 2 多部件段）点名的同款事故：「同值不广播，布尔旗标在多人下会漏第二次触发」，
      * 正解是<b>递增序号</b>。OrdertoCook 的 {@code ACTION_STATE} 与 dumbcat 的 {@code HURT_SEQ} 都是这个形状。
      */
+    /** 出招序号见下面 {@link #attackSequence()} 的说明。 */
     private static final EntityDataAccessor<Integer> DATA_ATTACK_SEQ =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<Integer> DATA_DEATH_TICK =
@@ -416,7 +430,9 @@ public abstract class ColossusBossEntity extends Monster {
 
     void beginAttack(MoveDef move) {
         this.contacts.clear(); // 每次出招是全新接触集（DBE 窗口语义）
-        this.entityData.set(DATA_ATTACK_INDEX, this.moveSet().indexOf(move.id()));
+        this.attackMove = move; // 服务端权威：中途 /reload 换表也不影响在播的这招（轮6 P3-3）
+        this.entityData.set(DATA_ATTACK_ID, move.id().toString());
+        this.entityData.set(DATA_ATTACK_DURATION, move.duration());
         this.entityData.set(DATA_ATTACK_TICK, 0);
         this.entityData.set(DATA_ATTACK_SEQ, this.entityData.get(DATA_ATTACK_SEQ) + 1); // 连放同招也要能重启动画
         this.cooldowns.put(move.id(), move.cooldownTicks() + move.duration());
@@ -430,7 +446,7 @@ public abstract class ColossusBossEntity extends Monster {
 
     /** 命中后写给目标的 invulnerableTime（招式声明，默认 0=连段友好）。 */
     public int postHitInvulnerability() {
-        MoveDef m = currentAttack();
+        MoveDef m = this.attackMove; // 权威对象：不受 /reload 换表影响
         return m == null ? 0 : m.postAttackInvuln();
     }
 
@@ -439,7 +455,9 @@ public abstract class ColossusBossEntity extends Monster {
     }
 
     void syncAttackNone() {
-        this.entityData.set(DATA_ATTACK_INDEX, -1);
+        this.attackMove = null;
+        this.entityData.set(DATA_ATTACK_ID, "");
+        this.entityData.set(DATA_ATTACK_DURATION, 0);
         this.entityData.set(DATA_ATTACK_TICK, 0);
     }
 
@@ -448,17 +466,37 @@ public abstract class ColossusBossEntity extends Monster {
     }
 
     /**
-     * 客户端：当前招式（按同步索引解析；-1 返回 null）。
-     * ATTACK_INDEX 与 §0.2 的关系说清楚（审查 P2#21）：索引<b>只作实时显示解析</b>
-     * （双端从同一份静态 MoveSet 解析、注册序天然一致），不进存档不进网络协议字段语义——
-     * 一切持久化（日志/回归断言/未来的 JSON）都用 id 字符串。
+     * 在播招式（<b>服务端权威对象</b>，{@link #beginAttack} 写入、结束时清空）。
+     * 刻意不再从同步数据反查本地表：表在客户端可能没有（datapack 只在服务端 reload），
+     * 而且换表发生在出招中途时，反查会读到<b>另一招</b>的 postAttackInvuln（轮6 P3-3）。
+     * 客户端调用本方法得到 null——它要显示什么请读 {@link #attackAnimId()} 与 {@link #attackProgress()}。
      */
     @Nullable
     public MoveDef currentAttack() {
-        int idx = this.entityData.get(DATA_ATTACK_INDEX);
-        if (idx < 0) return null;
-        var moves = this.moveSet().moves();
-        return idx < moves.size() ? moves.get(idx) : null;
+        return this.level().isClientSide ? null : this.attackMove;
+    }
+
+    @Nullable
+    private MoveDef attackMove;
+
+    /** 招式 id 字符串（同步）：给血条文案/动画名用；解析不到也不影响判定与进度。 */
+    public String attackAnimId() {
+        var m = this.currentAttack();
+        return m != null ? m.id().toString() : this.entityData.get(DATA_ATTACK_ID);
+    }
+
+    /** 招式动画名（同步的原版形态）：客户端适配器按名播，不必持有招式表。 */
+    public String attackAnimName() {
+        var m = this.currentAttack();
+        if (m != null) return m.animName();
+        String id = this.entityData.get(DATA_ATTACK_ID);
+        return id.isEmpty() ? "" : id;
+    }
+
+    /** 当前招式时长（同步，客户端可直接算进度）。 */
+    public int attackDuration() {
+        var m = this.currentAttack();
+        return m != null ? m.duration() : this.entityData.get(DATA_ATTACK_DURATION);
     }
 
     public int attackTick() { return this.entityData.get(DATA_ATTACK_TICK); }
@@ -473,8 +511,9 @@ public abstract class ColossusBossEntity extends Monster {
 
     /** 客户端动画进度 [0,1]（无动画后端时也有用：HUD 读条等）。 */
     public float attackProgress() {
-        MoveDef m = currentAttack();
-        return m == null ? 0f : Math.min(1f, this.attackTick() / (float) m.duration());
+        // 分母走同步时长：客户端没有招式表也算得对（旧写法查 currentAttack()，客户端恒 null）
+        int dur = this.attackDuration();
+        return dur <= 0 ? 0f : Math.min(1f, this.attackTick() / (float) dur);
     }
 
     /** 战斗激活后不再自然消失。 */
@@ -1051,7 +1090,8 @@ public abstract class ColossusBossEntity extends Monster {
     protected void defineSynchedData() {
         super.defineSynchedData();
         this.entityData.define(DATA_PHASE, 0);
-        this.entityData.define(DATA_ATTACK_INDEX, -1);
+        this.entityData.define(DATA_ATTACK_ID, "");
+        this.entityData.define(DATA_ATTACK_DURATION, 0);
         this.entityData.define(DATA_ATTACK_TICK, 0);
         this.entityData.define(DATA_ATTACK_SEQ, 0);
         this.entityData.define(DATA_SHIELD, 0.0f);

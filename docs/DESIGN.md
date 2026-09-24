@@ -286,3 +286,13 @@ protected void registerMoves(MoveSetBuilder m) {
 > 边界（如实）：JSON 侧暂不支持 `cue`（其载荷是类型化泛型，先给已有 8 个 trigger 配 codec 已完成）、
 > 不支持 `not_recent`/连招链（语料无先例，要的是 MoveSet 侧新运行时状态，留 v0.3）、
 > `requires` 无嵌套布尔（只有单键与取合取）、无跨包覆写声明式优先级。
+
+> 进度（2026-09-24 审查轮 6 + 第十五批·协议面去索引）：✅ 轮 6 把轮 4 我记的"索引只作显示、双端同源安全"这条偏差**判死**：
+> datapack 表只在服务端 reload（客户端 `MoveDataRegistry` 为空或残留上一世界），索引反解轻则无动画、重则错动画。
+> 修法是把协议面换成字符串并**删掉索引**：`DATA_ATTACK_ID`(同步 id) + `DATA_ATTACK_DURATION`(同步时长)，
+> `attackAnimId/attackAnimName/attackDuration/attackProgress` 全部客户端可算；`currentAttack()` 改服务端权威字段
+> （顺带修掉出招中途 /reload 读错 `postAttackInvuln` 的 P3-3）；`MoveSet.indexOf()` 零调用者即删。
+> 同批修 P2-1/P2-2/P2-3/P2-4/P3-1/P3-2/P3-4/P3-5（判据统一到 `FrameRunner.windowError`、广播计数当哨兵、
+> 帧数/深度封顶、快照来源身份、id 用 tryParse、上限断言取等号）。
+> 验证：build + **57/57** + audit **10** + GameTest **All 10 passed**。
+> 未验：多人客户端下的动画表现（本机起不了真客户端），只能靠"客户端不再需要表"这个结构性结论兜住。

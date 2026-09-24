@@ -28,6 +28,9 @@ public final class ProgressSync {
 
     private static final int CHECK_INTERVAL_TICKS = 20;
 
+    /** 本次服务端实例的身份（跨世界/重启都会换了它，客户端据此判"这是另一张表"）。 */
+    private static final long SERVER_IDENTITY = java.util.UUID.randomUUID().getMostSignificantBits();
+
     private static long lastSentRevision = Long.MIN_VALUE;
     private static int tickAccumulator = 0;
 
@@ -43,7 +46,8 @@ public final class ProgressSync {
         BossKillBoard board = BossKillBoard.get(server.overworld());
         if (!ProgressLedger.shouldSend(lastSentRevision, board.revision())) return;
         lastSentRevision = board.revision();
-        ColossusPackets.broadcastProgress(board.snapshot());
+        broadcastCount++;
+        ColossusPackets.broadcastProgress(stamped(board));
     }
 
     @SubscribeEvent
@@ -51,7 +55,7 @@ public final class ProgressSync {
         if (!(event.getEntity() instanceof ServerPlayer p)) return;
         MinecraftServer server = p.getServer();
         BossKillBoard board = BossKillBoard.get(server.overworld());
-        ColossusPackets.sendProgressTo(board.snapshot(), p);
+        ColossusPackets.sendProgressTo(stamped(board), p);
     }
 
     @SubscribeEvent
@@ -59,13 +63,26 @@ public final class ProgressSync {
         lastSentRevision = Long.MIN_VALUE; // 判据③：下次开服无条件重发一次
     }
 
-    /** 内容侧主动要求立刻重推（例如管理员改了存档、或别的系统直接写了 KillBoard）。 */
-    public static void invalidateServerCache() {
-        lastSentRevision = Long.MIN_VALUE;
+    /** 盖来源身份章（快照本体不带，因为它也是 SavedData 的落盘形状）。 */
+    private static net.minecraft.nbt.CompoundTag stamped(BossKillBoard board) {
+        net.minecraft.nbt.CompoundTag tag = board.snapshot();
+        tag.putLong("src", SERVER_IDENTITY);
+        return tag;
     }
 
-    /** 诊断：当前对账基线（回归桩用来证明"同值这一轮没发"）。 */
+    /** 对账基线（诊断用）。 */
     public static long lastSentRevision() {
         return lastSentRevision;
+    }
+
+    /**
+     * 实际广播次数。<b>光看基线挡不住"删掉脏检查"</b>——少了那扇门时基线仍会被设成同一个值，
+     * 断言照样绿（轮 6 建议的那条判据本身有洞）。所以这里数真发出去的包：
+     * 一次变化 → +1；之后静止若干轮 → 不再涨。
+     */
+    private static long broadcastCount;
+
+    public static long broadcastCount() {
+        return broadcastCount;
     }
 }

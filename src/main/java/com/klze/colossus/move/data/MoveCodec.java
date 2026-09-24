@@ -38,6 +38,12 @@ import java.util.function.ToIntFunction;
  */
 public final class MoveCodec {
 
+    /** 单条招式最多多少帧（轮6 P2-4：记录数封了 512，帧数不封就是"一条记录钉住主线程"）。 */
+    private static final int MAX_FRAMES_PER_MOVE = 64;
+
+    /** 触发器嵌套上限（once 套 once…；防深递归把栈打穿——SOE 不是 RuntimeException，loader 抓不住）。 */
+    private static final int MAX_TRIGGER_DEPTH = 8;
+
     /** 一条记录一个错误串；由 loader 汇总打印（静默跳过会被误认为生效）。 */
     public static final class MoveDataException extends Exception {
         public MoveDataException(String field, String message) {
@@ -50,7 +56,8 @@ public final class MoveCodec {
     // ==================== 触发器词汇表 ====================
 
     private interface TriggerDecoder {
-        MoveTrigger decode(JsonObject el) throws MoveDataException;
+        /** depth＝当前触发器嵌套层数（只有 once 会 +1，其余忽略）。 */
+        MoveTrigger decode(JsonObject el, int depth) throws MoveDataException;
     }
 
     private static final Map<ResourceLocation, TriggerDecoder> TRIGGER_TYPES = new HashMap<>();
@@ -76,41 +83,41 @@ public final class MoveCodec {
     }
 
     static {
-        registerTrigger("sound", (JsonObject el) -> {
+        registerTrigger("sound", (JsonObject el, int depth) -> {
             Sound d = orThrow(decode(el, Sound.CODEC), "sound");
             return MoveTriggers.sound(d.sound(), d.volume(), d.pitch());
         });
-        registerTrigger("event", (JsonObject el) -> MoveTriggers.event(requireString(el, "id")));
-        registerTrigger("arc_hit", (JsonObject el) -> {
+        registerTrigger("event", (JsonObject el, int depth) -> MoveTriggers.event(requireString(el, "id")));
+        registerTrigger("arc_hit", (JsonObject el, int depth) -> {
             ArcHit d = orThrow(decode(el, ArcHit.CODEC), "arc_hit");
             if (d.contactTag() == null || d.contactTag().isEmpty()) {
                 return MoveTriggers.arcHit(d.radius(), d.arc(), d.damage(), d.knockback());
             }
             return MoveTriggers.arcHitContacted(d.contactTag(), d.radius(), d.arc(), d.damage(), d.knockback());
         });
-        registerTrigger("circle_hit", (JsonObject el) -> {
+        registerTrigger("circle_hit", (JsonObject el, int depth) -> {
             CircleHit d = orThrow(decode(el, CircleHit.CODEC), "circle_hit");
             return MoveTriggers.circleHit(d.radius(), d.damage(), d.knockback());
         });
-        registerTrigger("sweep_hit", (JsonObject el) -> {
+        registerTrigger("sweep_hit", (JsonObject el, int depth) -> {
             SweepHit d = orThrow(decode(el, SweepHit.CODEC), "sweep_hit");
             return MoveTriggers.sweepHit(d.length(), d.damage(), d.knockback());
         });
-        registerTrigger("break_ahead", (JsonObject el) -> {
+        registerTrigger("break_ahead", (JsonObject el, int depth) -> {
             BreakAhead d = orThrow(decode(el, BreakAhead.CODEC), "break_ahead");
             return MoveTriggers.breakAhead(d.forward(), d.width(), d.height(), d.drop());
         });
-        registerTrigger("once", (JsonObject el) -> {
+        registerTrigger("once", (JsonObject el, int depth) -> {
             String tag = requireString(el, "tag");
-            MoveTrigger inner = decodeTriggerField(el.get("then"), "then");
+            MoveTrigger inner = decodeTriggerField(el.get("then"), "then", depth + 1);
             return MoveTriggers.once(tag, inner);
         });
-        registerTrigger("telegraph", (JsonObject el) -> {
+        registerTrigger("telegraph", (JsonObject el, int depth) -> {
             var zone = decodeZoneField(el.get("zone"), "zone");
             var effect = decodeEffectField(el.get("effect"), "effect");
             return MoveTriggers.telegraph(zone, effect);
         });
-        registerTrigger("telegraph_visual", el -> MoveTriggers.telegraphVisual(decodeZoneField(el.get("zone"), "zone")));
+        registerTrigger("telegraph_visual", (JsonObject el, int depth) -> MoveTriggers.telegraphVisual(decodeZoneField(el.get("zone"), "zone")));
 
         ZONE_KINDS.put("circle_ahead", el -> {
             CircleAhead d = orThrow(decode(el, CircleAhead.CODEC), "zone.circle_ahead");
@@ -196,7 +203,9 @@ public final class MoveCodec {
 
         var weightFn = decodeWeights(el);
         var check = decodeConditions(el);
-        ResourceLocation id = new ResourceLocation(ns.getNamespace(), key);
+        ResourceLocation id = ResourceLocation.tryParse(ns.getNamespace() + ":" + key);
+        if (id == null) throw new MoveDataException("id", "不是合法的招式 id：" + key
+                + "（合法字符：小写字母/数字/._-，路径段以 / 分隔）");
         return MoveDef.of(id, duration, cooldown, minPhase, maxPhase, range, anim,
                 weightFn, check, postInvuln, frames);
     }
@@ -207,6 +216,9 @@ public final class MoveCodec {
         if (!(el.get("frames") instanceof JsonArray arr)) {
             throw new MoveDataException("frames", "missing or not an array");
         }
+        if (arr.size() > MAX_FRAMES_PER_MOVE) {
+            throw new MoveDataException("frames", "条目数 " + arr.size() + " 超单招上限 " + MAX_FRAMES_PER_MOVE);
+        }
         for (int i = 0; i < arr.size(); i++) {
             if (!(arr.get(i) instanceof JsonObject row)) {
                 throw new MoveDataException("frames[" + i + "]", "not an object");
@@ -214,11 +226,15 @@ public final class MoveCodec {
             MoveTrigger trigger = decodeTriggerField(row.get("trigger"), "frames[" + i + "].trigger");
             if (row.has("at")) {
                 int at = intAt(row, "at", -1);
-                if (at < 1) throw new MoveDataException("frames[" + i + "].at", "frames start at 1");
+                String bad = com.klze.colossus.state.FrameRunner.windowError(at, at, 0);
+                if (bad != null) throw new MoveDataException("frames[" + i + "].at", bad);
                 out.add(new com.klze.colossus.state.FrameRunner.Frame<>(at, at,
                         (boss, tick) -> trigger.execute(boss, tick)));
             } else if (row.has("between")) {
                 int[] w = intPair(row.get("between"), "frames[" + i + "].between");
+                // 与 MoveSetBuilder 同一条判据：from<1 也要拒（旧写法只查了 to>=from → 死帧静默通过）
+                String bad = com.klze.colossus.state.FrameRunner.windowError(w[0], w[1], 0);
+                if (bad != null) throw new MoveDataException("frames[" + i + "].between", bad);
                 out.add(new com.klze.colossus.state.FrameRunner.Frame<>(w[0], w[1],
                         (boss, tick) -> trigger.execute(boss, tick)));
             } else if (row.has("repeating")) {
@@ -289,6 +305,14 @@ public final class MoveCodec {
     }
 
     private static MoveTrigger decodeTriggerField(JsonElement el, String field) throws MoveDataException {
+        return decodeTriggerField(el, field, 0);
+    }
+
+    private static MoveTrigger decodeTriggerField(JsonElement el, String field, int depth)
+            throws MoveDataException {
+        if (depth > MAX_TRIGGER_DEPTH) {
+            throw new MoveDataException(field, "触发器嵌套超过 " + MAX_TRIGGER_DEPTH + " 层");
+        }
         if (!(el instanceof JsonObject obj)) throw new MoveDataException(field, "expected an object");
         String typeId = requireString(obj, "type");
         // tryParse 而不是 new ResourceLocation：非法字符串会直接抛 IllegalArgumentException，
@@ -303,7 +327,7 @@ public final class MoveCodec {
             throw new MoveDataException(field + ".type", "unknown trigger '" + typeId + "' (known: "
                     + TRIGGER_TYPES.keySet().stream().map(ResourceLocation::getPath).sorted().toList() + ")");
         }
-        return d.decode(obj);
+        return d.decode(obj, depth);
     }
 
     private static java.util.function.Function<ColossusBossEntity, TelegraphZone> decodeZoneField(

@@ -18,19 +18,22 @@ import net.minecraft.resources.ResourceLocation;
 public final class ClientProgress {
 
     private static volatile ProgressLedger.Snapshot mirror =
-            new ProgressLedger.Snapshot(-1L, java.util.Map.of(), java.util.Set.of());
+            new ProgressLedger.Snapshot(0L, -1L, java.util.Map.of(), java.util.Set.of());
 
     private ClientProgress() {}
 
     /** 只由网络层调用（业务代码写这里=绕过服务端权威）。 */
     public static void apply(ProgressLedger.Snapshot next) {
-        // 代际号倒退＝上一张表的迟到包（换世界/重连竞态），直接丢：镜像只能变新
-        if (next.revision() < mirror.revision() && mirror.revision() >= 0L) return;
+        // 先比身份：不同服务端实例（换存档/服务端重启）的表一律整张替换，不参与"倒退即丢"判断
+        if (next.sourceIdentity() == mirror.sourceIdentity() && mirror.sourceIdentity() != 0L
+                && next.revision() < mirror.revision()) {
+            return; // 同源的迟到包才丢
+        }
         mirror = next;
     }
 
     public static void clear() {
-        mirror = new ProgressLedger.Snapshot(-1L, java.util.Map.of(), java.util.Set.of());
+        mirror = new ProgressLedger.Snapshot(0L, -1L, java.util.Map.of(), java.util.Set.of());
     }
 
     public static boolean isDefeated(ResourceLocation bossId) {

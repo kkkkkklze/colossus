@@ -115,9 +115,9 @@ public final class MoveSetBuilder {
          * 异常正好落在 serverAiStep 里，持久 Boss 会崩溃循环）。
          */
         public MoveBuilder between(int from, int to, MoveTrigger trigger) {
-            if (from < 1 || to < from) {
-                throw new IllegalArgumentException(
-                        "move " + id + ": bad frame window [" + from + "," + to + "] (frames start at 1)");
+            String bad = FrameRunner.windowError(from, to, 0);
+            if (bad != null) {
+                throw new IllegalArgumentException("move " + id + ": " + bad);
             }
             // duration 越界检查放到 done()——作者常先写 .between 再写 .duration（回归审查 P3#10 的 fluent 陷阱）
             frames.add(new FrameRunner.Frame<>(from, to, (boss, tick) -> trigger.execute(boss, tick)));
@@ -133,9 +133,9 @@ public final class MoveSetBuilder {
          * 即"新维度做成数据（帧参数），不做新子类"。
          */
         public MoveBuilder repeating(int from, int to, int period, MoveTrigger trigger) {
-            if (from < 1 || to < from) {
-                throw new IllegalArgumentException(
-                        "move " + id + ": bad repeating window [" + from + "," + to + "] (frames start at 1)");
+            String bad = FrameRunner.windowError(from, to, period);
+            if (bad != null) {
+                throw new IllegalArgumentException("move " + id + ": " + bad);
             }
             frames.add(FrameRunner.Frame.repeating(from, to, period,
                     (boss, tick) -> trigger.execute(boss, tick)));
