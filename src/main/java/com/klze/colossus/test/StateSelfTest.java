@@ -558,50 +558,75 @@ public final class StateSelfTest {
         // 下面这套断言的设计要求是"改错必须变红"（轮 19 P2-2：上一批新写的两条一条恒真、一条单向）。
         final int BUDGET = com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL;
         final int CAP = com.klze.colossus.env.TelegraphBudget.MAX_LIVE_PER_OUTLINE;
-        boolean costIsPeakAlive = true;   // ①记账 == 峰值存活
-        boolean coversRing = true;        // ②圈合得上（slots ≤ 率 × 粒子寿命）
-        boolean neverUnderBooks = true;   // ③轨迹上每一点都不低报（这条才真抓住 P2-1）
+        boolean costIsLifetimePeak = true;   // ①记账 == 一生峰值（不早不晚）
+        boolean coversRing = true;           // ②圈合得上（slots ≤ 率 × 覆盖窗口）
+        boolean neverUnderBooks = true;      // ③轨迹上每一点都不低报（这条才真抓住 P2-1）
         for (int life : new int[]{com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS,
                 com.klze.colossus.env.TelegraphBudget.SPARK_LIVE_TICKS}) {
             for (double radius : new double[]{0.5, 6.0, 30.0, 256.0}) {
-                var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * radius, life, BUDGET);
-                if (plan.empty()) { costIsPeakAlive = false; continue; }
-                costIsPeakAlive &= plan.liveCost()
-                        == com.klze.colossus.env.TelegraphBudget.peakAlive(plan.ratePerTick(), life)
-                        && plan.liveCost() <= CAP;
-                coversRing &= plan.slots() >= plan.ratePerTick()
-                        && (long) plan.ratePerTick() * life >= plan.slots();
-                // 逐 tick 推演这颗圈的一生：第 t tick 场上真的有 min(life, t+1) × 率 个粒子
-                // （早于出生的那些还没发）。旧实现记的是 率 × 剩余，尾段必然低于这个数。
-                for (int span : new int[]{11, 40, 1210}) {
-                    for (int tick = 0; tick < span; tick++) {
-                        int alive = plan.ratePerTick() * Math.min(life, tick + 1);
+                for (int span : new int[]{11, 40, 70, 1210}) {
+                    var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * radius, life,
+                            0L, span, com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL);
+                    if (plan.empty()) { costIsLifetimePeak = false; continue; }
+                    costIsLifetimePeak &= plan.liveCost() == plan.ratePerTick()
+                            * Math.min(life, span)
+                            && plan.liveCost() <= com.klze.colossus.env.TelegraphBudget.MAX_LIVE_PER_OUTLINE;
+                    coversRing &= plan.slots() >= plan.ratePerTick()
+                            && (long) plan.ratePerTick() * Math.min(life, span) >= plan.slots();
+                    // 逐 tick 推演：第 t tick 场上真的有 率 × min(粒子寿命, t) 个粒子，
+                    // 且到期之后按尾段衰减。旧实现记"率 × 剩余"，尾段必然低于这个数。
+                    for (int t = 1; t <= span + life + 1; t++) {
+                        int alive = com.klze.colossus.env.TelegraphBudget.tailAlive(
+                                plan.ratePerTick(), life, 0L, span, t);
                         neverUnderBooks &= plan.liveCost() >= alive;
                     }
                 }
             }
         }
-        check("particle ledger books the PEAK alive count (rate x particle life), not future emissions",
-                costIsPeakAlive);
+        check("particle ledger books each outline's LIFETIME PEAK (rate x min(particle life, emission span))",
+                costIsLifetimePeak);
         check("the drawn outline closes (slots <= rate x particle life)", coversRing);
-        check("booked cost is >= the ring's real on-screen population at every tick of its life",
+        check("booked cost is >= the ring's real on-screen population at every tick, including the tail",
                 neverUnderBooks);
         // 粒子寿命长到"一发就超上限"时必须不画，而不是"至少发一个"（轮 19 P2-2 第③条）
         check("a particle whose own life exceeds the cap makes the outline draw nothing at all",
-                com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 300, BUDGET).empty()
-                        && com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 241, BUDGET).empty()
-                        && !com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 240, BUDGET).empty());
+                com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 300, 0L, 1210L, BUDGET).empty()
+                        && com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 241, 0L, 1210L, BUDGET).empty()
+                        && !com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 240, 0L, 1210L, BUDGET).empty());
         int booked = 0;
         int funded = 0;
         for (int i = 0; i < 40; i++) { // 40 条同放（> HARD_MAX_TELEGRAPHS，故意压满）
             var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0,
-                    com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS, BUDGET - booked);
+                    com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS, 0L, 1210L, BUDGET - booked);
             if (plan.empty()) continue;
             booked += plan.liveCost();
             funded++;
         }
         check("the global ledger never books more than the cap, and the tail of the batch gets nothing",
                 booked <= BUDGET && funded > 0 && funded < 40);
+        // 尾段记账（轮 19 遗留的 post-mortem 滞留）：圈到期后粒子还要活最多"粒子寿命"那么久，
+        // 账本必须继续记它，否则"合计 ≤ 上限"只在圈还活着的那段成立。
+        boolean tailHolds = true;
+        for (int life : new int[]{48, 71}) {
+            for (int span : new int[]{11, 70, 1210}) {
+                var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, life, 0L, span, 2000);
+                // 到期那一 tick：尾段应当等于它生前的峰值账（粒子还没开始退场）
+                tailHolds &= com.klze.colossus.env.TelegraphBudget.tailAlive(
+                        plan.ratePerTick(), life, 0L, span, span) == plan.liveCost();
+                // 之后逐 tick 单调不增，且到 end + 粒子寿命 时归零
+                int prev = plan.liveCost() + 1;
+                for (int dt = 1; dt <= life + 2; dt++) {
+                    int now = com.klze.colossus.env.TelegraphBudget.tailAlive(
+                            plan.ratePerTick(), life, 0L, span, span + dt);
+                    tailHolds &= now <= prev && now >= 0;
+                    prev = now;
+                }
+                tailHolds &= com.klze.colossus.env.TelegraphBudget.tailAlive(
+                        plan.ratePerTick(), life, 0L, span, span + life + 1) == 0;
+            }
+        }
+        check("an outline's particles stay booked after it expires, decaying to zero exactly one particle-life later",
+                tailHolds);
         check("outline density is a per-tick-independent band (small ring 8, huge 96, NaN 8)",
                 com.klze.colossus.env.TelegraphBudget.ringSlotCount(0.5) == 8
                         && com.klze.colossus.env.TelegraphBudget.ringSlotCount(2 * Math.PI * 256) == 96

@@ -59,6 +59,8 @@ public final class TelegraphClient {
         final long startGameTime;
         final long endGameTime;
         ParticleOptions cachedParticle; // 粒子档：首帧算好后复用（撒点的热路径不 new）
+        int lastRate;                  // 上一 tick 的生成率（0＝没撒过）；圈到期后要拿它记尾段账
+        final int particleLife; // <b>不能</b>用字段初始化器算：那时 visual 还没赋值（构造器体在后），会一律读成 dust
 
         Live(int ownerBossId, ColossusBossEntity.TelegraphView view) {
             this.ownerBossId = ownerBossId;
@@ -68,6 +70,7 @@ public final class TelegraphClient {
             this.radiusY = view.zone().radiusY();
             this.colorRGB = view.zone().colorRGB();
             this.visual = view.zone().visual();
+            this.particleLife = com.klze.colossus.env.TelegraphBudget.particleLifeTicks(this.visual);
             this.startGameTime = view.startGameTime();
             this.endGameTime = view.endGameTime();
         }
@@ -185,9 +188,21 @@ public final class TelegraphClient {
         // 所以每一 tick 先把账清零，下面每画一条就把它的<b>峰值存活数</b>（率 × 发射时长）记进去，
         // 累到 TelegraphBudget.MAX_LIVE_GLOBAL 之后的圈只拿剩余额度（拿不到就退化成稀疏甚至不画）。
         liveParticleEstimate = 0;
+        // 尾段先入账（轮 19 遗留）：下面每条新圈看到的剩余额度，因此包含"已经消失但粒子还没散"的那部分
+        java.util.Iterator<long[]> tails = TAILS.iterator();
+        while (tails.hasNext()) {
+            long[] tail = tails.next();
+            int left = com.klze.colossus.env.TelegraphBudget.tailAlive((int) tail[0], (int) tail[1],
+                    tail[2], tail[3], now);
+            if (left <= 0) { tails.remove(); continue; }
+            liveParticleEstimate += left;
+        }
         while (zones.hasNext()) {
             Live z = zones.next().getValue();
-            if (z.endGameTime <= now) { zones.remove(); version++; continue; }
+            if (z.endGameTime <= now) {
+                addTail(z.lastRate, z.particleLife, z.startGameTime, z.endGameTime); // 粒子还要再活最多寿命那么久
+                zones.remove(); version++; continue;
+            }
             // 本地钟<b>落后超过一整个寿命</b>才不画（轮 16 P3-7 把措辞改成与实现一致）：
             // 新 ClientLevel 的 gameTime 起点是 0（ClientLevelData 构造器不设该字段，靠 tickTime 自增），
             // 只有 respawn 与 SetTime 被 netty 拆到不同批时才会看到那种量级的错位。
@@ -199,6 +214,10 @@ public final class TelegraphClient {
     }
 
     private static void dropOwner(int bossId) {
+        // 先给被剔的圈留下尾段账（Boss 离场不等于粒子消失）；换维度/登出走 clear()，那里整批作废
+        for (Live z : ZONES.values()) {
+            if (z.ownerBossId == bossId) addTail(z.lastRate, z.particleLife, z.startGameTime, z.endGameTime);
+        }
         if (ZONES.values().removeIf(z -> z.ownerBossId == bossId)) version++;
     }
 
@@ -218,6 +237,7 @@ public final class TelegraphClient {
     public static void clear() {
         if (!ZONES.isEmpty()) version++;
         ZONES.clear();
+        TAILS.clear(); // 等级换了/登出了：粒子系统整个重建，留着尾段就是记幽灵账
         lastLevel = null; // static 强引用：不复位就把整张旧 ClientLevel（entityStorage/chunkSource 一长串）扣住
         // 名单<b>不动</b>（上面 javadoc 的理由），但 <b>memo 必须逐个复位</b>（轮 17 P2-2）：
         // 改成不清名单之后，forgetTelegraphMemo() 的唯一调用点就只剩 watch() —— 同一张图内调 clear()
@@ -299,6 +319,21 @@ public final class TelegraphClient {
     /** 本 tick 已记的活跃粒子账（只在 {@link #tick()} 的轮廓循环开头清零）。 */
     private static int liveParticleEstimate = 0;
 
+    /**
+     * 已经停止发射、但粒子还在场上活着的"尾段"（轮 19 遗留的 post-mortem 滞留）。
+     * 轮廓条目在 {@code end} 那一 tick 就没了，此前撒下的粒子还要再活最多 {@code 粒子寿命 - 1} tick；
+     * 账本若跟着条目一起清零，"合计 ≤ 全局上限"就只在"圈还活着"那段成立。
+     * 上限 64 条：超出时逐出最老的（方向是<b>少记账</b>，与"闸不咬人"同一侧，不会误伤画面）。
+     */
+    private static final java.util.ArrayDeque<long[]> TAILS = new java.util.ArrayDeque<>();
+    private static final int MAX_TAILS = 64;
+    /** TAILS 元素布局：[0]=生成率 [1]=粒子寿命 [2]=startGameTime [3]=endGameTime。 */
+    private static void addTail(int rate, int particleLife, long start, long end) {
+        if (rate <= 0) return;
+        while (TAILS.size() >= MAX_TAILS) TAILS.pollFirst();
+        TAILS.addLast(new long[]{rate, particleLife, start, end});
+    }
+
     /** 粒子档：沿轮廓撒一圈。预算式子全在 {@link com.klze.colossus.env.TelegraphBudget}。 */
     private static void spawnOutlineParticles(Minecraft mc, Live z) {
         // 按到圆环最近点算，不是到圈心（轮 16 P2-2）：到圈心的话，玩家站在大圈的边缘
@@ -313,9 +348,10 @@ public final class TelegraphClient {
         // 记账要限的是场上存活数，那是"率 × 粒子寿命"，与这颗圈还剩多久无关——
         // 上一版按剩余时间记账，只剩 1 tick 的大圈被记 5 个、实际场上站着 197 个。
         var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * z.radiusXZ,
-                com.klze.colossus.env.TelegraphBudget.particleLifeTicks(z.visual),
+                z.particleLife, z.startGameTime, z.endGameTime,
                 com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL - liveParticleEstimate);
-        if (plan.empty()) return; // 全局额度已被前面的圈用完：变稀/暂不画，而不是把帧率换掉
+        if (plan.empty()) { z.lastRate = 0; return; } // 全局额度已被前面的圈用完：变稀/暂不画，而不是把帧率换掉
+        z.lastRate = plan.ratePerTick(); // 到期时要按这个率记尾段
         liveParticleEstimate += plan.liveCost(); // 记账单位=峰值存活数（率 x <b>粒子</b>寿命），与两道闸同量纲
         RandomSource r = mc.level.getRandom();
         ParticleOptions p = z.cachedParticle != null ? z.cachedParticle : (z.cachedParticle = particleFor(z));

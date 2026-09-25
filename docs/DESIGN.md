@@ -210,7 +210,7 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
    **密度与成本的选型规则**（轮 17 设计偏差第 3 条；数字于轮 18 P3-5 全部重算，之前那个"半径 > ~24"是编的）：
    粒子档的式子在 `env/TelegraphBudget`（纯算术、不 import MC，所以最快那道门能断言它）——
    想要的槽位数 `wantSlots = clamp(2πr·1.5, 8, 96)`；每 tick 生成率 `= clamp(240 / 粒子自身寿命, 1, …)`
-   （dust 48t ⇒ 5/tick；spark 71t ⇒ 3/tick）；**记账与预算都按"存活数 = 率 × 粒子寿命"**，
+   （dust 48t ⇒ 5/tick；spark 71t ⇒ 3/tick）；**记账按"这颗圈的一生峰值 = 率 × min(粒子寿命, 发射窗口)"**（第三十一批再订正：记满"率 × 粒子寿命"会让只发射 11 tick 的速发圈虚高 4 倍多、吃光全局额度），到期后的余晖由尾段账本继续记，
    合计再受 `MAX_LIVE_GLOBAL = 2000` 这道总闸约束（默认 8 条各 240 刚好容得下）。
    预算铺不满 `wantSlots` 时**把槽位数降下来**而不是留下几段弧——"圈合不上"的正确修法（轮 18 P2-1 后半）。
    三个真实的转折点：密度在 **r ≈ 10.2** 处触到 96 槽上限（`96/(1.5·2π)`）；每点间隔在 **r ≈ 30.6** 处超过 2 格
@@ -909,3 +909,21 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > 状态栈快照、跨招三件原语、`DATA_DEATH_TICK`、许可证仍 ARR。
 > 验证：build（`-Pgecko`）+ 自检 **128/128**（125→128，站点集合差精确核过）+ audit **14** +
 > `runGameTestServer` **All 14 required tests passed**（两轮）。
+
+> 进度（2026-09-26 第三十一批·轮 19 遗留的 post-mortem 滞留 + 记账第四次校准）：
+> ✅ 记账式子最终定为 **`率 × min(粒子寿命, 发射窗口)`**＝该圈一生里最多同时占用的粒子数。
+> 轮 19 的处置把它写成"率 × 粒子寿命"，那一版对长命圈对、对短命圈**虚高 4 倍多**
+> （`warn=0` 只发射 11 tick 却按 48 tick 记账），会把 `MAX_LIVE_GLOBAL` 提前吃光、
+> 让后面的圈无故领不到额度——这次是我自己上一批的处置栏留下的新错，已在审查文档里就地标注。
+> ✅ `plan` 改收 `start/end` 两个绝对时刻（顺带用 `emissionSpan` 在转 int <b>之前</b>钳住，
+> 轮 19 P3-4 的截断危险由此消除，而不是靠一个假上限掩盖）。
+> ✅ 尾段账本：`TelegraphBudget.tailAlive`（纯函数）给出一颗已停止发射的圈此刻还剩多少活跃粒子，
+> `TelegraphClient.TAILS`（上限 64、超出逐出最老，方向是少记账＝不误伤画面）每 tick 先把这些余晖
+> 记进 `liveParticleEstimate`，所以"合计 ≤ 2000"这句现在覆盖到"圈已经消失、粒子还没散"那段；
+> 换维度/登出走 `clear()` 时整批作废（粒子系统重建，留着的账是幽灵账）。
+> ✅ 判据从"挑一档"改成**逐 tick 轨迹**：`span ∈ {11,40,70,1210}` × `life ∈ {48,71}` × 4 档半径，
+> 断言 `liveCost == 率 × min(寿命, span)`、每一 tick `tailAlive ≤ liveCost`、尾段在 `end + 寿命` 归零。
+> ✅ 变异抽查再加一次：**MUT-D**（把记账改回 `率 × life`）⇒ 两条断言同时红（`SELFTEST FAILED: 2/129`），
+> 还原后 129/129。本批累计做了 MUT-A / MUT-B / MUT-C2 / MUT-D 四次，每次都先看它是否变红再还原。
+> 验证：build（`-Pgecko`）+ 自检 **129/129** + audit **14** + `runGameTestServer`
+> **All 14 required tests passed**（两轮）。§7 里"post-mortem 滞留"那条从未做清单移除此作废。

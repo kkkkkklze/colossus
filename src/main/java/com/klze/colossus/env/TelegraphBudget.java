@@ -88,7 +88,33 @@ public final class TelegraphBudget {
     // 那道钳与它"1210 就是最大值"的假口径一起删掉——showTelegraph 允许调用方给更长寿命，
     // 那句话与它冲突（轮 19 P3-2）。截断危险由"不存在转换"消除，而不是由一个数字上限掩盖。
 
-    /** 视觉密度：圆周长 → 想要的槽位数（{@code 8..96}；NaN/0 走下限）。 */
+    /**
+     * 一颗<b>已经停止发射</b>的圈（轮廓到点被移出投影表）此刻还占着多少活跃粒子。
+     *
+     * <p>为什么需要它（轮 19 遗留的 post-mortem 滞留）：轮廓条目在 {@code end} 那一 tick 就没了，
+     * 但它此前撒下的粒子还要再活最多 {@code 粒子寿命 - 1} tick。如果账本跟着条目一起清零，
+     * "合计 ≤ 2000"这句就只在"圈还活着"的那段成立——高频出招时（一圈接一圈，每圈都在尾段留一堆
+     * 余晖）真实场上量会高于账面值。本函数给出那段<b>线性衰减</b>的尾巴，客户端把它继续记账。
+     *
+     * @param ratePerTick   这颗圈生前的生成率
+     * @param particleLife  粒子自身寿命
+     * @param startGameTime 发射开始的绝对时刻
+     * @param endGameTime   发射<b>停止</b>的绝对时刻（轮廓到期）
+     * @param nowGameTime   当前时刻
+     */
+    public static int tailAlive(int ratePerTick, int particleLife,
+                                long startGameTime, long endGameTime, long nowGameTime) {
+        if (ratePerTick <= 0) return 0;
+        long life = Math.max(1, particleLife);
+        // 还活着的粒子来自区间 [now - life, now) 内的发射，与 [start, end) 求交：
+        long from = Math.max(startGameTime, nowGameTime - life);
+        long to = Math.min(endGameTime, nowGameTime);
+        long span = to - from;
+        if (span <= 0L) return 0;
+        return ratePerTick * (int) Math.min(span, life);
+    }
+
+    /** 一条轮廓密度：圆周长 → 想要的槽位数（{@code 8..96}；NaN/0 走下限）。 */
     public static int ringSlotCount(double circumference) {
         double want = circumference * SLOTS_PER_BLOCK;
         if (!(want > MIN_SLOTS)) return MIN_SLOTS;
@@ -106,34 +132,56 @@ public final class TelegraphBudget {
      * <p>顺带修掉两个副作用：槽位不再逐 tick 收缩（轮 19 P2-1 的"相位跳变"与"角位映射重排"随之消失）；
      * {@code byGlobal} 的除数与入账的乘数<b>同一个量</b>（都是粒子寿命），不再一个用 life 一个用 window。
      *
-     * @param circumference  圆周长（决定想要的密度）
-     * @param particleLife   {@link #particleLifeTicks} 的结果（<b>粒子</b>自己活几 tick）
+     * @param circumference   圆周长（决定想要的密度）
+     * @param particleLife    {@link #particleLifeTicks} 的结果（<b>粒子</b>自己活几 tick）
+     * @param startGameTime   这一发开始发射的绝对时刻
+     * @param endGameTime     停止发射的绝对时刻（两者一起给"一生峰值"与覆盖窗口）
      * @param globalRemaining 全局天花板还剩多少；≤0 ⇒ 返回 {@link Outline#NONE}（本条不画）
      */
-    public static Outline plan(double circumference, int particleLife, int globalRemaining) {
+    public static Outline plan(double circumference, int particleLife,
+                               long startGameTime, long endGameTime, int globalRemaining) {
         int life = Math.max(1, particleLife);
+        int window = (int) Math.min((long) life, Math.max(1L, emissionSpan(startGameTime, endGameTime)));
         int want = ringSlotCount(circumference);
-        int byOutline = MAX_LIVE_PER_OUTLINE / life; // 定义反解：率 = 存活上限 / 粒子寿命（<b>不</b>加地板 1） // 定义反解：率 = 存活上限 / 粒子寿命（<b>不</b>加地板 1）
+        int byOutline = MAX_LIVE_PER_OUTLINE / life; // 定义反解：率 = 存活上限 / 粒子寿命（<b>不</b>加地板 1）
         int byGlobal = Math.max(0, globalRemaining) / life;
         int budget = Math.min(byOutline, byGlobal);
         // 付不起一个 tick 一发（粒子寿命比上限还长）就不画，而不是"至少发一个"——后者会让
         // 单条就超上限（life=300 时 1×300 > 240）。今天 particleLifeTicks 只可能给 48/71 所以不显形，
-        // 但这条边界必须有判据（轮 19 P2-2 的第③条）。
+        // 但这条边界必须有判据（轮 19 P2-2 第③条）。
         if (budget <= 0) return Outline.NONE;
-        // 覆盖要求：每个角位都要在"上一发还没消失"之前被重新照亮 ⇒ slots / 率 <= 粒子寿命。
-        // 于是"圈合得上"的真正判据是 <b>slots ≤ 率 × 粒子寿命</b>，与这颗圈还剩几 tick 无关（轮 19 设计偏差第 2 条）。
-        int need = (want + life - 1) / life;
+        // 覆盖要求：每个角位都要在"上一发还没消失"之前被重新照亮 ⇒ slots / 率 <= min(粒子寿命, 发射窗口)。
+        int need = (want + window - 1) / window;
         int rate = Math.min(Math.max(need, 1), budget);
-        int slots = Math.min(want, rate * life);
-        return new Outline(slots, rate, rate * life);
+        int slots = Math.min(want, rate * window);
+        // 记账＝这颗圈<b>一生里最多同时</b>占用的粒子数：率 × min(粒子寿命, 发射窗口)。
+        // 用发射窗口而不是"剩余 tick"（轮 19 P2-1）：剩余会逐 tick 变小，那数的是"还要撒几个"；
+        // 用满粒子寿命也不对（轮 19 尾段断言逼出来的）：warn=0 的圈只发射 11 tick，
+        // 记 48 会把短命圈虚报 4 倍多、把全局额度吃光。<b>一生峰值</b>既不会低估也不会虚高。
+        return new Outline(slots, rate, rate * window);
     }
 
     /**
-     * 这颗圈<b>任意时刻</b>在场上最多占几个粒子——与 {@link Outline#liveCost()} 同一个式子，
-     * 单独成一个函数只为让自检能把它写成"轨迹上每一点都不低于真实存活"这种断言。
+     * 发射窗口（{@code end - start}，非负、并在转 int 之前钳住）。
+     * 轮 19 P3-4 的 {@code (int)} 截断危险在这里消除：先钳再转，而不是靠调用方记得兜。
      */
-    public static int peakAlive(int ratePerTick, int particleLife) {
-        return Math.max(0, ratePerTick) * Math.max(1, particleLife);
+    public static long emissionSpan(long startGameTime, long endGameTime) {
+        long span = endGameTime - startGameTime;
+        if (span <= 0L) return 0L;
+        return Math.min(span, MAX_SPAN_TICKS);
+    }
+
+    /** 发射窗口的安全上界：只用于防止 long→int 截断，不是"业务上最大的圈"。 */
+    public static final long MAX_SPAN_TICKS = 1_000_000L;
+
+    /**
+     * 一颗"<b>还在发射</b>"的圈此刻实际占几个粒子：过去 {@code 粒子寿命} tick 内撒的那些还没消失
+     * （出生之前没有），即 {@code 率 × min(粒子寿命, now - start)}。与 {@code liveCost}（一生峰值）
+     * 同一个式子在 {@link #tailAlive} 里复用，所以两处不会各写一份算错。
+     */
+    public static int liveNow(int ratePerTick, int particleLife, long startGameTime, long endGameTime,
+                              long nowGameTime) {
+        return tailAlive(ratePerTick, particleLife, startGameTime, endGameTime, nowGameTime);
     }
 
     private TelegraphBudget() {}
