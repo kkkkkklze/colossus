@@ -30,10 +30,14 @@ public final class RespawnSchedule {
     /**
      * 全部撤单（队长倒下时用）。
      *
-     * <p>只关掉"以后还能不能排"是不够的：{@code leaderDown} 门管不到<b>已经在队列里</b>的那几条，
-     * 而队长死亡演出默认 100t 内 {@link SquadManager#tick} 照常跑——到点就补员，
-     * 补出来的那具<b>收不到</b> {@code onLeaderDefeated} 广播（广播已在演出开场发完），
-     * 于是变成"Boss 死了、成员在尸体边上打人"。审查轮 7 P1-4。
+     * <p><b>先把机制说准</b>（审查轮 8 更正——我轮 7 这里写反过一次）：队长挂起死亡后补员路径
+     * <b>本来就点不着</b>，{@code ColossusBossEntity.aiStep} 在 {@code deathPending} 时早退，
+     * {@code tickSessionAndSquad} 里还有一道 {@code !deathPending} 门，所以"演出 100t 里到点补员"
+     * 不成立，本方法不是修那个 bug。
+     *
+     * <p>它买的是<b>账的语义</b>：队长已死，它名下不该再有排期。留着条目只会让 {@code save()}
+     * 把"死队长的复活预约"写进 NBT，读起来像仍有意图；哪天有人重构那两道死亡门，这里就静默补员。
+     * 显式撤掉比"靠别处的门挡住"可靠。
      */
     public void cancelAll() {
         dueAt.clear();

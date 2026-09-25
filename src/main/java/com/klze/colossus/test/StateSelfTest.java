@@ -32,6 +32,7 @@ public final class StateSelfTest {
         testFrameAdvanceIdempotent();
         testFrameRepeatingFiresEveryPeriod();
         testFrameRepeatingSkipsBeatsWithoutCompensation();
+        testMoveAnimNameDomain();
         testContactBook();
         testTableSamplerInterpolation();
         testPartRig();
@@ -243,8 +244,40 @@ public final class StateSelfTest {
 
     // ---------------- FrameRunner cases ----------------
 
-    private static void testFrameSingleShot() {
-        List<Integer> hit = new ArrayList<>();
+    /**
+     * 动画名值域（审查轮 8 P2）：它是客户端取动画的<b>键</b>，空串不会自己报错，
+     * 只会让 GL/模型侧按名查不到而静默不播——最难查的一类故障，所以两条入口都在登记期拒。
+     */
+    private static void testMoveAnimNameDomain() {
+        boolean blankRejected = false;
+        boolean nullRejected = false;
+        try {
+            new com.klze.colossus.move.MoveSetBuilder(null, new net.minecraft.resources.ResourceLocation("colossus", "t"))
+                    .move("silent").duration(10).anim("").done();
+        } catch (IllegalArgumentException expected) {
+            blankRejected = true;
+        }
+        try {
+            new com.klze.colossus.move.MoveSetBuilder(null, new net.minecraft.resources.ResourceLocation("colossus", "t"))
+                    .move("silent").duration(10).anim(null).done();
+        } catch (IllegalArgumentException expected) {
+            nullRejected = true;
+        }
+        check("blank anim name is rejected at registration (not silently unplayable)",
+                blankRejected && nullRejected);
+
+        // 空白串同样拒（" " 查不到动画，症状与 "" 一模一样）
+        boolean whitespaceRejected = false;
+        try {
+            new com.klze.colossus.move.MoveSetBuilder(null, new net.minecraft.resources.ResourceLocation("colossus", "t"))
+                    .move("silent").duration(10).anim("   ").done();
+        } catch (IllegalArgumentException expected) {
+            whitespaceRejected = true;
+        }
+        check("whitespace-only anim name is rejected too", whitespaceRejected);
+    }
+
+    private static void testFrameSingleShot() {        List<Integer> hit = new ArrayList<>();
         FrameRunner<Object> fr = FrameRunner.builder()
                 .at(3, (c, t) -> hit.add(t))
                 .build();

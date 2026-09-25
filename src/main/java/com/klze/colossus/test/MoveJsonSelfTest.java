@@ -87,6 +87,22 @@ final class MoveJsonSelfTest {
                         "unknown zone kind"));
         check.accept("per-move frame count is capped", rejects(framesOf(70), "frames"));
         check.accept("nested once beyond depth cap is rejected", rejects(nestedOnce(12), "嵌套"));
+        // 轮 8 补：三条新钉住的入口——显示字段的值域、以及原先只有 frames 封顶的另两条数组
+        check.accept("blank anim name is rejected and names the field",
+                rejects("{ 'id':'b', 'duration':10, 'anim':'', 'frames':[{'at':2,"
+                        + "'trigger':{'type':'colossus:event','id':'x'}}] }", "anim"));
+        check.accept("weight entry count is capped", rejects(entriesOf("weight",
+                "{'kind':'base','base':1}", 17), "weight"));
+        check.accept("requires entry count is capped", rejects(entriesOf("requires",
+                "{'phase_in':[0,9]}", 17), "requires"));
+    }
+
+    /** 造一条带 N 个同名条目的记录（封顶类判据共用：16 合法、17 拒）。 */
+    private static String entriesOf(String field, String element, int count) {
+        StringBuilder sb = new StringBuilder("{ 'id':'b', 'duration':10, '").append(field).append("':[");
+        for (int i = 0; i < count; i++) sb.append(i == 0 ? "" : ",").append(element);
+        sb.append("], 'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}]}");
+        return sb.toString();
     }
 
     // ==================== 小工具 ====================

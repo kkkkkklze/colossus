@@ -44,6 +44,14 @@ public final class MoveCodec {
     /** 触发器嵌套上限（once 套 once…；防深递归把栈打穿——SOE 不是 RuntimeException，loader 抓不住）。 */
     private static final int MAX_TRIGGER_DEPTH = 8;
 
+    /**
+     * 权重/准入条目上限（轮 8 P3）：这两条数组原先**没封顶**，而选招时每 tick 对表内每条招式
+     * 全遍历一遍（{@code MoveSet.pick}）——轮 6 那句"一条记录钉住主线程"只是换了个入口还在。
+     * 封顶取 16：真实招式表里没人叠这么多调制项，超了就是写错或恶意。
+     */
+    private static final int MAX_WEIGHT_ENTRIES = 16;
+    private static final int MAX_CONDITIONS_PER_MOVE = 16;
+
     /** 一条记录一个错误串；由 loader 汇总打印（静默跳过会被误认为生效）。 */
     public static final class MoveDataException extends Exception {
         public MoveDataException(String field, String message) {
@@ -193,6 +201,11 @@ public final class MoveCodec {
         }
         float range = el.has("range") ? (float) requireFloat(el.get("range"), "range") : -1.0f;
         String anim = el.has("anim") ? requireString(el, "anim") : key;
+        if (anim.isBlank()) {
+            // 值域的最终闸门在 MoveDef 构造器（两条入口共用）；这里先报错是为了给作者
+            // **字段级**回执，而不是让 IllegalArgumentException 混进"解析炸了"那一类（轮 8 P2）
+            throw new MoveDataException("anim", "animation name must not be blank");
+        }
 
         var frames = decodeFrames(el);
         if (frames.isEmpty()) throw new MoveDataException("frames", "move has no frames at all");
@@ -267,6 +280,9 @@ public final class MoveCodec {
         if (!(el.get("weight") instanceof JsonArray arr) || arr.isEmpty()) {
             throw new MoveDataException("weight", "expected a non-empty array of entries");
         }
+        if (arr.size() > MAX_WEIGHT_ENTRIES) {
+            throw new MoveDataException("weight", "条目数 " + arr.size() + " 超上限 " + MAX_WEIGHT_ENTRIES);
+        }
         List<ToIntFunction<AttackContext>> parts = new ArrayList<>();
         for (int i = 0; i < arr.size(); i++) {
             if (!(arr.get(i) instanceof JsonObject row)) {
@@ -289,6 +305,9 @@ public final class MoveCodec {
         if (!el.has("requires")) return check;
         if (!(el.get("requires") instanceof JsonArray arr)) {
             throw new MoveDataException("requires", "expected an array");
+        }
+        if (arr.size() > MAX_CONDITIONS_PER_MOVE) {
+            throw new MoveDataException("requires", "条目数 " + arr.size() + " 超上限 " + MAX_CONDITIONS_PER_MOVE);
         }
         for (int i = 0; i < arr.size(); i++) {
             if (!(arr.get(i) instanceof JsonObject row) || row.size() != 1) {

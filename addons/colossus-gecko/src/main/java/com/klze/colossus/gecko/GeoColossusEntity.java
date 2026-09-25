@@ -79,13 +79,14 @@ public abstract class GeoColossusEntity extends ColossusBossEntity implements Ge
             this.lastSeenSeq = this.attackSequence();
             return state.setAndContinue(raw(this.deathAnim()));
         }
-        // 轮 7 P1-1：currentAttack() 是服务端权威对象，客户端恒 null——而控制器跑在渲染路径上，
-        // 拿它当门会让出招动画永不播。改读同步串 attackAnimName()（空串＝当前无招）。
-        String anim = this.attackAnimName();
-        if (anim.isEmpty()) {
+        // 轮 7 P1-1：currentAttack() 是服务端权威对象，客户端恒 null——控制器跑在渲染路径上，
+        // 拿它当门会让出招动画永不播。轮 8 P2 再把门的语义挪到 isAttacking()：
+        // 门认<b>招式 id</b>（服务端保证非空），动画名只是取动画的键，两个职责不要混在一个字段上。
+        if (!this.isAttacking()) {
             this.lastSeenSeq = this.attackSequence();
             return PlayState.STOP;
         }
+        String anim = this.attackAnimName();
         int seq = this.attackSequence();
         if (seq != this.lastSeenSeq) {
             // 新的一次施法：强制复位再起播，否则同招二连会在原地续播上一轮剩余帧

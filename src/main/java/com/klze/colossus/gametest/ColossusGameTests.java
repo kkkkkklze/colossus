@@ -96,6 +96,64 @@ public class ColossusGameTests {
     }
 
     /**
+     * 已结算尸体过档回归（审查轮 8 P1，v0.2 P0 的第二个入口）。
+     *
+     * <p>症状：玩家杀死 Boss 后，在这 20t 收尸窗口内退出世界/区块卸载 → 重进世界原地站着
+     * 一具 1 血、会正常选招攻击、永不消失的 Boss；任何人碰它一下就走完整遍死亡流程 ——
+     * {@code KillBoard} 二次计数 + 战利品二次发放（缓冲已置 null，防重 roll 那道门失效）。
+     *
+     * <p>成因：{@code colossus_dying} 存的是 {@code deathPending && !deathResolved}，
+     * 结算之后它就是 false（所以读档不续演出），而血量已是 0；hp 回填的 clamp 下限把 0 抬成 1.0。
+     *
+     * <p>时间线（1.20.1 一手源码）：{@code deathAnimationTicks()=100} ⇒ t≈101 结算并
+     * {@code setHealth(0)}（{@code ColossusBossEntity.resolveDeath}）；原版 {@code tickDeath}
+     * 要到 {@code deathTime >= 20} 才 {@code remove(KILLED)}（{@code LivingEntity:546-551}），
+     * 而 {@code DeathTime} <b>不入档</b>（{@code LivingEntity:669} 附近只写 Health）⇒
+     * t≈110 过档正落在窗口正中：原 Boss 尚未移除（血量 0），重载那具拿到 {@code dying=false + hp=0}。
+     */
+    @GameTest(template = YARD, timeoutTicks = 400, batch = "death-resolve-save")
+    public void resolvedCorpseDoesNotResurrectAsOneHpStatue(GameTestHelper helper) {
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        var mock = helper.makeMockPlayer();
+        boss.hurt(boss.damageSources().playerAttack(mock), 10_000f);
+
+        helper.runAfterDelay(110, () -> {
+            // 先自证时间线，否则整桩测的是别的东西
+            helper.assertFalse(boss.isRemoved(),
+                    "110t 应仍在原版收尸的 20t 窗口内（太早/太晚都要重取时点）");
+            helper.assertTrue(boss.getHealth() <= 0.0f,
+                    "结算后血量应为 0，实际 " + boss.getHealth() + "（＝演出还没结束，过档拿不到尸体形态）");
+            int killsAtSave = BossKillBoard.get(helper.getLevel()).killCount(ExampleColossus.BOSS_ID);
+
+            var tag = new net.minecraft.nbt.CompoundTag();
+            boss.saveWithoutId(tag);
+            // 模拟"这一档随卸载离场"：原尸必须先退场，否则 `load(tag)` 会把 loaded 的 UUID
+            // 改成它的，场上出现两个同 UUID 的实体——ServerLevel 的 entityByUuid 会被后写的那个
+            // 覆盖，收尸时 unregister 又不校验身份（归因就脏了。审查轮 8 顺带记的这笔账）
+            boss.discard();
+            ColossusBossEntity loaded = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                    new BlockPos(4, 3, 4));
+            loaded.load(tag);
+            // 这两条就是原 bug 的正面判据：hp_ratio 的 clamp 下限 1.0f 会把尸体抬成 1 血，
+            // 而 colossus_dying=false 让挂起位补不回来 → 它会照常选招
+            helper.assertTrue(loaded.getHealth() <= 0.0f,
+                    "读档不许给已结算的尸体抬血，实际 " + loaded.getHealth() + "（＝1 血雕像重现）");
+            helper.assertTrue(loaded.isDeathPending(),
+                    "读档应认出「这具已结算」并把死亡挂起补回来（否则它会照常选招攻击）");
+
+            helper.runAfterDelay(60, () -> {
+                helper.assertTrue(loaded.isRemoved(),
+                        "原版收尸路径必须自己走完（还站着＝血被钉住了，P0 死循环换个入口复发）");
+                helper.assertTrue(BossKillBoard.get(helper.getLevel())
+                                .killCount(ExampleColossus.BOSS_ID) == killsAtSave,
+                        "尸体退场不得二次结算（击杀计数从过档起又涨了＝战利品也会二次发放）");
+                succeedClean(helper, boss, loaded);
+            });
+        });
+    }
+
+    /**
      * 护壳弱点回归（第六批分体系统的玩家可达路径）：核心在位→本体减伤；
      * 分流累计攒满阈值→核心碎（位图清 ACTIVE 置 DEAD）、后续伤害恢复全额。
      */
@@ -236,21 +294,23 @@ public class ColossusGameTests {
 
                 boss.hurt(boss.damageSources().playerAttack(mock), 10_000f); // 队长倒下（演出 100t）
                 helper.runAfterDelay(5, () -> {
+                    // 这条才是"撤单"的唯一判别式：倒下前在途 1 条、倒下后必须归零
                     helper.assertTrue(boss.squad().respawnPending() == 0,
-                            "队长倒下即撤单：倒下前在途 " + pendingBefore + " 条，现在仍剩 "
-                                    + boss.squad().respawnPending() + " 条（＝leaderDown 只挡新排期、"
-                                    + "不撤在途，演出到点会补出一具收不到广播的成员）");
+                            "队长倒下即撤掉在途预约：倒下前 " + pendingBefore + " 条，现在仍剩 "
+                                    + boss.squad().respawnPending() + " 条（＝死队长名下还挂着复活预约）");
                     helper.assertFalse(boss.isRemoved(),
-                            "本桩靠「演出仍在 tick」才有判别力，此时就 isRemoved 说明时间线不对");
+                            "本桩靠「演出仍在进行」才有意义，此时就 isRemoved 说明时间线不对");
                 });
                 helper.runAfterDelay(140, () -> {
-                    // respawnDelay=100 落在 100t 演出窗口内：没撤单就一定到点补员（这条不是恒真）
+                    // 口径说明（审查轮 8 更正）：这条**不是**撤单的判别式——补员路径在 deathPending
+                    // 下被 aiStep 早退 + tickSessionAndSquad 的双重门挡死，删掉 cancelAll 它也绿。
+                    // 它证的是"队长结算移除之后场上不残留任何预约补出来的成员"，属时间线兜底。
                     helper.assertTrue(sentriesAround(helper, boss).isEmpty(),
-                            "到点不该再长回成员（在途排期没撤，演出中就会补出一具打人的）");
+                            "队长已结算移除，场上不该再有任何属于它的成员");
                     helper.assertTrue(boss.isRemoved(), "Boss 应已结算移除");
 
                     // === 收摊广播判别式（轮 7 补测）===
-                    // 上面的时序把现役成员先杀了，"队长倒下时<b>活着</b>的成员必须自己收摊"
+                    // 上面的时序把现役成员先杀了，"队长倒下时「活着的」成员必须自己收摊"
                     // 这条就失去观察者——旧桩里它由 180t 后的 "sentriesAround().isEmpty()" 兼着，
                     // 那个时点 Boss 已移除，等于没测。另起一队，在演出窗口内取判。
                     ColossusBossEntity second = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
@@ -321,7 +381,7 @@ public class ColossusGameTests {
      * 客户端若拿 index 当"新一次施法"的判据，第二下就不会重启动画（原地卡住）。
      * 顺带钉住 {@code forceMove} 的不可打断闸门。
      */
-    @GameTest(template = YARD, timeoutTicks = 200, batch = "anim-seq")
+    @GameTest(template = YARD, timeoutTicks = 520, batch = "anim-seq")
     public void repeatedCastBumpsSequenceNotIdentity(GameTestHelper helper) {
         ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
                 new BlockPos(4, 3, 4));
@@ -362,6 +422,8 @@ public class ColossusGameTests {
             }
         }
         helper.runAfterDelay(40, () -> new Retry().run());
+        // 注：timeoutTicks 必须大于本桩的轮询上界（40 + 40×10 = 440t），否则先被框架判超时，
+        // 上面那句 helper.fail 是到不了的死支（审查轮 8 抓到：原先钉的是 200）。
     }
 
     /**

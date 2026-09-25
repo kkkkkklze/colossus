@@ -432,7 +432,11 @@ public abstract class ColossusBossEntity extends Monster {
         double dmgMul = s.damageMultiplier(players) * ColossusConfig.GLOBAL_DAMAGE_MULTIPLIER.get();
         setOrRemove(this.getAttribute(Attributes.MAX_HEALTH), SCALE_HP_ID, hpMul - 1.0);
         setOrRemove(this.getAttribute(Attributes.ATTACK_DAMAGE), SCALE_DMG_ID, dmgMul - 1.0);
-        if (this.getMaxHealth() > 0) {
+        if (this.getMaxHealth() > 0 && this.getHealth() > 0.0f) {
+            // 回填只在"还活着"时做：0 血是已结算尸体的形态，抬成 1.0f 就等于
+            // isDeadOrDying() 永假 → 原版 tickDeath 的 20t 收尸路径整条断掉（审查轮 8 P1，
+            // 新桩第一次跑就红在这——读档那道门修好了，这里第二个抬血点又把人救回来了）。
+            // 演出期血量钉在 1.0，走的是同一个分支，行为不变。
             this.setHealth(Math.max(1.0f, ratio * this.getMaxHealth())); // 百分比回填
         }
     }
@@ -547,17 +551,26 @@ public abstract class ColossusBossEntity extends Monster {
     }
 
     /**
-     * 招式动画名：直接读服务端下发的同步串（空串＝当前无招）。
+     * 招式动画名：直接读服务端下发的同步串（无招时为空串——{@code syncAttackNone} 写的）。
      * 客户端适配器与模型都该用这个，而不是 {@link #currentAttack()}——后者是服务端权威对象，客户端恒 null。
+     * 判"有没有在施法"请用 {@link #isAttacking()}（认 id），别拿这个显示字段当门。
      */
     public String attackAnimName() {
         return this.currentAttack() != null ? this.currentAttack().animName()
                 : this.entityData.get(DATA_ATTACK_ANIM);
     }
 
-    /** 是否正在施法（双端都能问，客户端不依赖招式表）。 */
+    /**
+     * 是否正在施法（双端都能问，客户端不依赖招式表）。
+     *
+     * <p>判据取<b>招式 id</b>而不是动画名：id 由 {@code ResourceLocation} 保证非空，
+     * 而动画名是<b>显示字段</b>（审查轮 8 P2）。曾用动画名非空串当门，后果是
+     * 一旦有作者写 {@code .anim("")}，服务端帧表照跑、客户端所有门（模型姿态、
+     * addon 移动控制器、下游免伤/仇恨判据）全部认为"没在出招"——表现与判定分家。
+     * 动画名的值域已改由 {@code MoveDef} 构造器钉住（非空白），但门的语义不该靠值域。
+     */
     public boolean isAttacking() {
-        return !this.entityData.get(DATA_ATTACK_ANIM).isEmpty();
+        return !this.entityData.get(DATA_ATTACK_ID).isEmpty();
     }
 
     /** 当前招式时长（同步，客户端可直接算进度）。 */
@@ -805,8 +818,10 @@ public abstract class ColossusBossEntity extends Monster {
     /** 演出开场副作用：血条清零并隐藏/停音乐/清延迟队列/成员收摊（渲染层读 DEATH_TICK）。 */
     void onDeathSequenceStart() {
         this.workQueue.clear(); // 死亡后不再结算旧的 telegraph/延迟动作（审查 P2）
-        // squad 收摊放在<b>演出开场</b>而不是结算处：默认演出 100t 里 SquadManager.tick 照常跑，
-        // 等 resolveDeath 才撤单，中途到点的那具成员就补出来了，而且它收不到收摊广播（审查轮 7 P1-4）。
+        // squad 收摊放在<b>演出开场</b>而不是结算处：演出默认 100t 里队长血量钉在 1.0、isAlive() 仍 true，
+        // 成员照旧被锚点钉在尸体肩上挨打——广播晚发就是"Boss 已死、触手还在陪葬"。
+        // （不是"不提前就会到点补员"：补员在 deathPending 下被 aiStep 与 tickSessionAndSquad 双重门挡死，
+        //  轮 7 我在这里写过错误的机制，轮 8 更正。）
         if (!this.squad().defs().isEmpty() && this.level() instanceof ServerLevel server) {
             this.squad().notifyLeaderDeath(server);
         }
@@ -1252,6 +1267,16 @@ public abstract class ColossusBossEntity extends Monster {
             this.deathPending = true;
             this.resumeDeathPending = true;
         }
+        // 已结算过的尸体（原版收尸那 20t 里存的档）：此时 colossus_dying 已是 false
+        // （deathResolved 把演出位清掉了），但存盘血量是 0。若照原样回填 hp_ratio，
+        // 下面那句 Mth.clamp(..., 1.0f, max) 会把 0 抬成 1 → 一具"会选招、打不掉、永不消失"
+        // 的 1 血雕像（v0.2 P0 的原样复发），再挨一刀就走完整遍死亡流程：
+        // KillBoard 多记一刀 + 战利品再 roll 一份（缓冲已置 null，防重 roll 门失效）。
+        // 判据就用血量本身——演出期血量被钉在 1.0，只有结算后才归零，不再新增一个 NBT 位。
+        if (this.getHealth() <= 0.0f && !this.level().isClientSide) {
+            this.deathPending = true;
+            this.deathResolved = true; // 只收尸，绝不二次结算
+        }
         // 缩放修饰符是 transient，读档即失效→原版按基础 max 截断过血量；
         // 这里立刻重挂修饰符并按保存的血量百分比回填（审查 P2"读档掉血"）
         if (tag.contains("colossus_hp_ratio") && !this.deathPending
@@ -1278,19 +1303,24 @@ public abstract class ColossusBossEntity extends Monster {
         if (tag.contains("colossus_works", net.minecraft.nbt.Tag.TAG_LIST)
                 && !this.level().isClientSide) {
             this.workQueue.clear();
+            long now = this.level().getGameTime();
+            int malformed = 0;
+            int overdue = 0;
             for (var t : tag.getList("colossus_works", net.minecraft.nbt.Tag.TAG_COMPOUND)) {
-                if (!(t instanceof CompoundTag one)) continue;
+                if (!(t instanceof CompoundTag one)) { malformed++; continue; }
                 long due = one.getLong("due");
-                if (due <= 0L || one.getString("kind").isEmpty()) continue; // 残缺条目：丢掉，别在 tick 里炸
-                if (due <= this.level().getGameTime()) {
-                    // 卸载期间 gameTime 照走 → 这一发的"预警窗口"已经过去了。
-                    // 重载后直接落 = Boss 站着不动、地上没圈却挨一刀（tell 撒谎），所以宁可不落。
-                    // 帧时间线整体不入 NBT 是 v0.3 的账（DESIGN §3），这里先把不对称的尖角磨掉。
-                    Colossus.LOGGER.warn("boss {} dropped {} overdue deferred works on load",
-                            this.getBossId(), this.pendingWorkCount() + 1);
-                    continue;
-                }
+                if (due <= 0L || one.getString("kind").isEmpty()) { malformed++; continue; } // 残缺：丢掉，别在 tick 里炸
+                if (due <= now) { overdue++; continue; }
+                // 卸载期间 gameTime 照走 → 这一发的"预警窗口"已经过去了。
+                // 重载后直接落 = Boss 站着不动、地上没圈却挨一刀（tell 撒谎），所以宁可不落。
+                // 帧时间线整体不入 NBT 是 v0.3 的账（DESIGN §3），这里先把不对称的尖角磨掉。
                 this.workQueue.add(new DeferredWork(due, one.getString("kind"), one.getCompound("data")));
+            }
+            // 计数在循环外汇总一次：原先那条 warn 打的是"此刻已入队的条数 +1"，
+            // 既不是过期条数、又随遍历递增（审查轮 8 P3，日志会说谎）
+            if (overdue > 0 || malformed > 0) {
+                Colossus.LOGGER.warn("boss {} dropped {} overdue and {} malformed deferred works on load ({} kept)",
+                        this.getBossId(), overdue, malformed, this.workQueue.size());
             }
         }
         if (tag.contains("colossus_shield", net.minecraft.nbt.Tag.TAG_FLOAT)

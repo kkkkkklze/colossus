@@ -40,6 +40,12 @@ public final class MoveDef {
         this.minPhase = minPhase;
         this.maxPhase = maxPhase;
         this.range = range;
+        // 动画名是客户端渲染层的键，值域在这里钉死（两条入口 DSL/JSON 都经过本构造器，
+        // 不留"某条路径能绕过"的第二形态——审查轮 8 P2）。空串不会自己报错，
+        // 只会让 GL 侧按名查不到而静默 STOP，那种故障查起来最贵。
+        if (animName == null || animName.isBlank()) {
+            throw new IllegalArgumentException("move " + id + ": animName must be non-blank");
+        }
         this.animName = animName;
         this.weightFn = weightFn;
         this.extraCheck = extraCheck;

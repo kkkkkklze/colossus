@@ -189,9 +189,15 @@ public final class SquadManager {
     private boolean leaderDown;
 
     /**
-     * 队长倒下：撤掉在途重生排期 + 广播收摊。<b>死亡演出开场就调</b>（
-     * {@code ColossusBossEntity.onDeathSequenceStart}），不等 {@code resolveDeath}——
-     * 演出默认 100t 里 {@link #tick} 还在跑，晚一步就有一次到点补员漏出来。
+     * 队长倒下：撤掉在途重生排期 + 广播收摊。<b>死亡演出开场就调</b>
+     * （{@code ColossusBossEntity.onDeathSequenceStart}），不等 {@code resolveDeath}。
+     *
+     * <p>提前的理由是<b>收摊时机与胜负对齐</b>：演出默认 100t（{@code deathAnimationTicks}），
+     * 这期间队长血量钉在 1.0、{@code isAlive()} 仍为 true，成员照旧被锚点钉在尸体肩上、
+     * 照旧挨打——等到结算才广播＝"Boss 明明已经死了，触手还在陪葬"。
+     * <b>不要</b>把它理解成"不提前就会到点补员"：补员路径在 {@code deathPending} 下被
+     * {@code aiStep} 早退与 {@code tickSessionAndSquad} 的双重门挡死（审查轮 8 更正，
+     * 我轮 7 就是这么写错的，细节见 {@link RespawnSchedule#cancelAll()}）。
      *
      * <p>走的是<b>身份账</b>而不是扫场，所以"未加载的成员"这一格照 v7 的口径留给时间：
      * 它没收到广播，但队长已经从世界上消失，下次它 tick 时 {@code resolveLeader} 解析不到人，
@@ -201,7 +207,7 @@ public final class SquadManager {
      */
     public void notifyLeaderDeath(ServerLevel level) {
         leaderDown = true;
-        respawn.cancelAll(); // 先撤单，再广播——顺序反了会让到点条目在这一 tick 里补出来
+        respawn.cancelAll(); // 撤的是"死队长的复活预约"，不是补员时序（见 RespawnSchedule#cancelAll）
         for (ColossusSquadMember m : iterateMembers(level)) {
             m.onLeaderDefeated();
         }
