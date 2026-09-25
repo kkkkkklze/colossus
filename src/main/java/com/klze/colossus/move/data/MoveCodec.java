@@ -187,6 +187,19 @@ public final class MoveCodec {
         });
     }
 
+    /**
+     * 严格整数 Codec：{@code Codec.INT} 在 DFU 6.0.8 里是
+     * {@code getNumberValue(...).map(Number::intValue)}——**照样把 10.5 静默截成 10**。
+     * 轮 12 F3：同一个字段的数组形态已经会拒、codec 形态却仍截断，等于一个字段两套规则
+     * （正是 {@code MoveDef} javadoc 自己立的"不留可绕过的第二形态"）。错因由 {@code orThrow}
+     * 拼成字段级回执，所以作者看到的是 {@code <字段>: codec rejected input: ...}。
+     */
+    private static final Codec<Integer> STRICT_INT = Codec.DOUBLE.flatXmap(
+            d -> d == Math.rint(d) ? com.mojang.serialization.DataResult.success((int) (double) d)
+                    : com.mojang.serialization.DataResult.error(
+                            () -> "expected an integer, got " + d),
+            i -> com.mojang.serialization.DataResult.success(i.doubleValue()));
+
     /** 整数值读取：非整数/非数字一律字段级拒（原先 {@code (int) requireFloat} 会把 8.9 静默截成 8）。 */
     private static int requireInt(JsonElement el, String field) throws MoveDataException {
         if (el == null || !el.isJsonPrimitive()) throw new MoveDataException(field, "missing or not a number");
@@ -541,8 +554,8 @@ public final class MoveCodec {
                 Codec.DOUBLE.optionalFieldOf("forward", 0.0).forGetter(CircleAhead::forward),
                 Codec.DOUBLE.optionalFieldOf("side", 0.0).forGetter(CircleAhead::side),
                 Codec.DOUBLE.fieldOf("radius").forGetter(CircleAhead::radius),
-                Codec.INT.optionalFieldOf("warn", 30).forGetter(CircleAhead::warn),
-                Codec.INT.optionalFieldOf("color", 0xFF4040).forGetter(CircleAhead::color),
+                STRICT_INT.optionalFieldOf("warn", 30).forGetter(CircleAhead::warn),
+                STRICT_INT.optionalFieldOf("color", 0xFF4040).forGetter(CircleAhead::color),
                 Codec.STRING.optionalFieldOf("visual", "").forGetter(CircleAhead::visual)
         ).apply(i, CircleAhead::new));
     }
@@ -556,7 +569,7 @@ public final class MoveCodec {
 
     private record FreezeEffect(int ticks) {
         static final Codec<FreezeEffect> CODEC = RecordCodecBuilder.create(i -> i.group(
-                Codec.INT.fieldOf("ticks").forGetter(FreezeEffect::ticks)
+                STRICT_INT.fieldOf("ticks").forGetter(FreezeEffect::ticks)
         ).apply(i, FreezeEffect::new));
     }
 
@@ -564,15 +577,15 @@ public final class MoveCodec {
         static final Codec<Band> CODEC = RecordCodecBuilder.create(i -> i.group(
                 Codec.DOUBLE.fieldOf("min").forGetter(Band::min),
                 Codec.DOUBLE.fieldOf("max").forGetter(Band::max),
-                Codec.INT.fieldOf("add").forGetter(Band::add)
+                STRICT_INT.fieldOf("add").forGetter(Band::add)
         ).apply(i, Band::new));
     }
 
     private record RepeatingWindow(int from, int to, int period) {
         static final Codec<RepeatingWindow> CODEC = RecordCodecBuilder.create(i -> i.group(
-                Codec.INT.fieldOf("from").forGetter(RepeatingWindow::from),
-                Codec.INT.fieldOf("to").forGetter(RepeatingWindow::to),
-                Codec.INT.fieldOf("period").forGetter(RepeatingWindow::period)
+                STRICT_INT.fieldOf("from").forGetter(RepeatingWindow::from),
+                STRICT_INT.fieldOf("to").forGetter(RepeatingWindow::to),
+                STRICT_INT.fieldOf("period").forGetter(RepeatingWindow::period)
         ).apply(i, RepeatingWindow::new));
     }
 }

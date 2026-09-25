@@ -422,9 +422,14 @@ public class ColossusGameTests {
                 // 而"必中"还额外依赖池组成与表尾顺序——demo 包再加一招、或给 roar 也挂 notRecent，
                 // 判据方向就会漂（可能恒绿也可能恒红，且都跟地板逻辑无关）。
                 // 这里要证的只是"3 + (-6) 没把这条招挤出表"，那就断权重本身。
-                helper.assertTrue(quakeDef != null
-                                && quakeDef.weight(far.withCandidate(quakeDef)) >= 1,
-                        "放过的 quake 在远端权重必须 >=1（<1 就被 pick 整条丢掉＝「降权」其实是禁选）");
+                // 断**精确值**而不是 >=1：远端本应是 base 3 + distance_band 0 = 3，
+                // 被 recent_band(-6) 夹到地板 1。>=1 的写法在"历史压根没命中"时也给 3，照样绿＝可以空转
+                // （轮 12 F6）。老实现的症状是 -3（被 pick 整条丢掉），所以 ==1 两头都有区分度。
+                int wFar = quakeDef == null ? -999
+                        : quakeDef.weight(far.withCandidate(quakeDef));
+                helper.assertTrue(wFar == 1,
+                        "放过的 quake 在远端权重应被夹到地板 1，实际 " + wFar
+                                + "（3＝历史/降权没生效＝空转；<=0＝「降权」其实是禁选）");
                 succeedClean(helper, boss, revived);
             });
         });

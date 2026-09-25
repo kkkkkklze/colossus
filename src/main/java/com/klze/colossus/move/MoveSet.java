@@ -18,25 +18,28 @@ public final class MoveSet {
     private final com.klze.colossus.entity.ColossusBossEntity boss;
 
     /**
-     * 设计意图提示的去重表（轮 11）。
+     * 设计意图提示的去重表（轮 11 加、轮 12 改）：种类 → 上次 warn 时的<b>表版本号</b>。
      *
-     * <p>构造发生在 {@code ColossusBossEntity#moveSet()} 的<b>惰性</b>路径上：不做去重，
-     * 一农场 Boss 就会刷出 N 条一模一样的 warn（同文件里建表失败那条日志特意做了"只报一次"，
-     * 这条不能更吵）。因此必须声明在构造器之前——字段初始化器要跑在那段代码之前。
+     * <p>为什么按版本而不是"每种只报一次"：作者的实际循环是"改 JSON → {@code /reload} → 看日志"，
+     * 而 {@code moveSet()} 是按 {@code MoveDataRegistry#revision()} 重建的。只按种类去重且永不复位，
+     * 第一次 warn 之后同类 Boss 无论 reload 多少次都不再 warn——包括"这次才改坏"的那一次。
+     * 种类数有限，这张表不会无界增长。
      */
-    private static final java.util.Set<String> FULLY_GATED_WARNED =
-            java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+    private static final java.util.Map<String, Long> FULLY_GATED_WARNED_AT =
+            java.util.Collections.synchronizedMap(new java.util.HashMap<>());
 
     MoveSet(com.klze.colossus.entity.ColossusBossEntity boss, List<MoveDef> moves) {
         this.boss = boss;
         this.moves = List.copyOf(moves);
         String warnKey = boss != null ? String.valueOf(boss.getBossId()) : "<no-boss>";
+        long tableRevision = com.klze.colossus.move.MoveDataRegistry.revision();
         // 表里每条都挂上不小于表长的历史窗口 ＝ 作者其实想要的是"轮换"而不是"防重复"。
         // 引擎有保底（见 pick），不会因此空转，但这条设计意图值得说一句——静默兜底最容易让人
         // 一辈子没发现自己写的窗口等于禁用。
         if (!this.moves.isEmpty() && this.moves.stream()
                 .allMatch(m -> m.notRecent() >= this.moves.size())
-                && FULLY_GATED_WARNED.add(warnKey)) {
+                && !Long.valueOf(tableRevision).equals(FULLY_GATED_WARNED_AT.get(warnKey))) {
+            FULLY_GATED_WARNED_AT.put(warnKey, tableRevision);
             com.klze.colossus.Colossus.LOGGER.warn("每张招都挂 notRecent>=表长({})——选招将长期依赖"
                     + "「挡空后放开历史门」的保底；要真轮换请显式设计冷却/权重", this.moves.size());
         }
@@ -116,10 +119,15 @@ public final class MoveSet {
             // record</b>，不是零分配；短命对象由逃逸分析吃掉，真要省得把 ctx 改成可变结构，不值得。
             AttackContext ctxM = ctx.withCandidate(m);
             if (!m.available(ctxM)) continue;
-            if (!ignoreHistory && m.blockedByHistory(ctxM)) { historyBlocked++; continue; }
             if (cooldownLeft.applyAsInt(m.id()) > 0) continue;
             int w = m.weight(ctxM);
             if (w <= 0) continue;
+            // 历史门放最后（轮 12 F2）：它原先夹在中间，于是"被 CD 挡住"的招只要也中了历史门
+            // 就被计入 historyBlocked ⇒ 重试照样空手、那句 debug 又指认了一个不是根因的原因。
+            // 挪到链尾后 historyBlocked 恰好等于"放开历史就能进池"的条数，重试必非空。
+            // 顺序不影响池：阶段/距离/自定义谓词/CD/权重彼此独立，而 recent_band 有地板 1，
+            // 历史项不可能把正权重压成 <=0（base 0 那种真禁用仍由上一行的 w<=0 拒掉）。
+            if (!ignoreHistory && m.blockedByHistory(ctxM)) { historyBlocked++; continue; }
             pool.add(m);
             weights.add(w);
             total += w;

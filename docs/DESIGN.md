@@ -73,7 +73,9 @@ protected void registerMoves(MoveSetBuilder m) {
      .range(6.0f)                                  // 目标距离门（≤ 才可选）
      .weight(ctx -> ctx.distSq() < 25 ? 3 : 1)     // 上下文权重
      .notRecent(3)                             // 防背板：一等的历史门（引擎看得见，挡空时能放开保底）
-     .requires(ctx -> ctx.usedRecently(2))       // 跨招组合才用这条（如"放过 A 才准放 B"）
+     .requires(ctx -> !ctx.boss().usedRecently(Colossus.res("smash"), 2))
+                                                   // 跨招互斥才用 requires（且要指名别的招）；
+                                                   // 引擎看不见这类门 ⇒ 整表都挂它就没有保底可放开
      .anim("attack_smash")                         // 客户端动画名（字符串协议）
      .at(10, MoveTriggers.sound("entity.generic.explode"))
      .at(24, MoveTriggers.arcHit(6.5f, 90, 7.0f, 0.4f))   // 判定帧：扇形 AOE
@@ -462,7 +464,7 @@ protected void registerMoves(MoveSetBuilder m) {
 > （正向与反向断言各一条）。窗口值域三处钉死：DSL setter 抛带招式名的 IAE、JSON 给字段级回执、
 > 构造器兜底；表内每条都挂满窗口时构造期打一条 warn 说破"作者要的其实是轮换"（本批跑桩时真的响了）。
 > ✅ `recent_band` 的语义纠正：原先 `base 3 + recent -6 = -3` 会被 `pick` 整条丢掉，
-> "降权仍可选"其实是禁选——现在普通项与历史项分路，历史项地板 1；GameTest 用定种子第 2 掷钉住。
+> "降权仍可选"其实是禁选——现在普通项与历史项分路，历史项地板 1；GameTest 用定种子第 2 掷钉住。 【同上收回：见第二十二/二十三条。】
 > ✅ 环本体抽成纯件 `move/MoveHistory`，自检因此能钉住方向（低位＝最新）、容量（滑出 8 格即失效）、
 > "0 留给空槽"（`colossus:big` 这种 `hashCode & 0x7F == 0` 的 id 记进去仍查得到）、重复记录不虚高、
 > snapshot/restore 往返——共 +8 条；类上再加 `static` 不变量（值域+1 必须小于槽宽、`BITS*SLOTS==64`），
@@ -508,3 +510,32 @@ protected void registerMoves(MoveSetBuilder m) {
 > （历史门移到 `blockedByHistory` 由 `MoveSet#pick` 管），当时只宣告了 `MoveDef.of` 签名变化。
 > 上游若照 498d295 写过"自己调 `available()` 就以为含 not_recent"的选招循环，升级后会**静默失去历史门**。
 > 验证：build（`-Pgecko`）+ 自检 **82/82**（+1：一条改不出红的判据被换成分水岭版，另加两条布局自洽）+ audit **13** + GameTest **All 13 passed**；那条构造期 warn 整轮只出现 1 次（去重生效）。
+
+> 进度（2026-09-25 第二十三批·审查轮 12 处置，**其中一半是在收回我自己上一批写坏的东西**）：
+> ①**我上一批改文档时把样例改成了自相矛盾**：§2.2 的 DSL 样例同时挂 `.notRecent(3)` 与
+> `.requires(ctx -> ctx.usedRecently(2))`——而 `ctx.usedRecently(n)` 读的就是**候选自己**，
+> "最近 2 次用过"⊂"最近 3 次用过"，这一招永远选不出来，且 `pick` 的保底只放开 `notRecent`、
+> 救不了 `extraCheck`。样例已改成指名别的招的跨招互斥
+> （`ctx.boss().usedRecently(Colossus.res("smash"), 2)`），并写明"这类门引擎看不见 ⇒ 整表都挂就没有保底可放开"；
+> `MoveSetBuilder#notRecent` 的 javadoc 末句同样错、同步改。**收回上一批那句"跨招组合才用 requires(ctx -> ctx.usedRecently(n))"**。
+> ②`collect` 的门序原来是 `available → 历史 → CD → 权重`，于是"被 CD 挡住"的招只要也中了历史门就被
+> 计入 `historyBlocked` ⇒ 重试照样空手、那句 debug 又指认了不是根因的原因（正是上一轮要消灭的那类说谎）。
+> 历史门挪到链尾，`historyBlocked` 现在恰等于"放开历史就能进池"的条数。
+> ③**"requireInt 已铺到全部整数站点"是说过头了**：DFU 那批 `Codec.INT` 字段（`distance_band.add`、
+> `freeze.ticks`、`circle_ahead.warn/color`、`repeating` 对象形态）照旧静默截断，而同一个 `repeating`
+> 的数组形态已经会拒 ⇒ 一个字段两套规则。补 `STRICT_INT`（`Codec.DOUBLE` + 判整）替换全部 7 个站点。
+> 注：`DataResult.result(...)` 在 1.20.1 的 DFU 里不是成功构造器，正确名是 `DataResult.success(...)`
+> （从 sources jar 里 `OptionInstance`/`SpriteSources` 的用法核到），第一版编译就红了。
+> ④构造期那条 warn 的去重键原先只有 Boss 种类 ⇒ `/reload` 之后同类 Boss 永久沉默，
+> 而作者的实际循环就是"改 JSON → reload → 看日志"（包括"这次才改坏"的那一次）。改成 `Map<种类, 表版本>`。
+> ⑤上一批我在 `FULLY_GATED_WARNED` 上写的"必须声明在构造器之前，因为字段初始化器要跑在那段代码之前"**是错的**：
+> 它是 `static final`，走 `<clinit>`，JLS 12.4.1 保证任何实例构造前类已初始化；文本位置只是可读性。
+> 代码无害、注释说谎，按本工程口径改掉。
+> ⑥桩判据 `weight >= 1` 改成**精确 1**：`>= 1` 在"历史/降权根本没命中"时也给 3，照样绿＝可以空转
+> （远端本应是 `base 3 + band 0 = 3`，被 `recent_band(-6)` 夹到地板 1；老实现是 `-3` 被整条丢掉，
+> 所以 `== 1` 两头都有区分度）。另补两条会变红的整数用例（手写帮手一条、DFU codec 一条）。
+> **另外收回上一批的一条"证据"**：我说"构造期 warn 整轮只响 1 次 ⇒ 去重生效"——那 1 次来自
+> GameTest 里合成的 `gatedOnly` 单招表（它把 `colossus:example` 这个键占了），对本次修改**不构成证据**。
+> **以及轮 11 的一条口径**：`blockedByHistory` 补 `candidate == this` 当时在库内不可达（唯一调用点自带 candidate），
+> 那是 API 加固而不是缺陷；代价是下游漏传 candidate 时**静默失去历史门**，javadoc 已把这层代价说破。
+> 验证：build（`-Pgecko`）+ 自检 **84/84**（+2 条整数判整用例）+ audit **13** + GameTest **All 13 passed**。

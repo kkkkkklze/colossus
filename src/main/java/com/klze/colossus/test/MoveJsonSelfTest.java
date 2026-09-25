@@ -113,6 +113,15 @@ final class MoveJsonSelfTest {
         check.accept("blank anim name is rejected and names the field",
                 rejects("{ 'id':'b', 'duration':10, 'anim':'', 'frames':[{'at':2,"
                         + "'trigger':{'type':'colossus:event','id':'x'}}] }", "anim"));
+        // 整数站点族（轮 12 F6）：回退成 getAsInt()/Codec.INT 时这两条必须变红——
+        // 手写帮手一条、DFU codec 一条，覆盖"同一个字段两套规则"那个坑
+        check.accept("non-integer duration is rejected, not truncated",
+                rejects("{ 'id':'b', 'duration':10.5,"
+                        + "'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }", "integer"));
+        check.accept("non-integer weight entry (DFU codec side) is rejected too",
+                rejects("{ 'id':'b', 'duration':10, 'weight':[{'kind':'distance_band','min':0.0,"
+                        + "'max':6.0,'add':10.5}],'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }",
+                        "integer"));
         check.accept("weight entry count is capped", rejects(entriesOf("weight",
                 "{'kind':'base','base':1}", 17), "weight"));
         check.accept("requires entry count is capped", rejects(entriesOf("requires",

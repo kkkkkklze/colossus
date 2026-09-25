@@ -116,7 +116,10 @@ public final class MoveSetBuilder {
          * <p>与 {@code requires(ctx -> !ctx.usedRecently(n))} 的区别是这条<b>引擎看得见</b>：
          * {@link MoveSet#pick} 在整表被历史挡空时会忽略历史门再选一次。环形窗口只由出招推进、
          * 等待不消解，看不见它的引擎会让 Boss 出现不随时间愈合的空窗甚至永久死锁（审查轮 10 F1）。
-         * 自定义组合（"A 放过之后才准放 B"）才用 {@code requires} 里那个手写谓词。
+         * <p>跨招互斥（"刚放过 A 才准放 B"）必须用 {@code requires(ctx -> ctx.boss().usedRecently(A, n))}
+     * 这种**指名别的招**的写法——{@code ctx.usedRecently(n)} 读的就是候选自己，跟本方法同义，
+     * 拿它再挂一道只会把这一招变成恒假（轮 12 F1：§2.2 的样例就是这么自相矛盾的）。
+     * 另外 {@code requires} 里的历史判断是引擎看不见的门：整表都挂它就没有保底可放开。
          */
         public MoveBuilder notRecent(int window) {
             if (window < 1 || window > MoveHistory.SLOTS) {
