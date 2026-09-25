@@ -7,19 +7,24 @@ package com.klze.colossus.env;
  * 这两道闸的判据必须在<b>最快的那道门</b>（{@code colossusSelfTest}）里能跑红。留在客户端类里，
  * 自检就要链接 {@code TelegraphClient → RingZoneRenderer → RenderType} 这条链——今天它能跑只是因为
  * {@code RenderType} 恰好只在方法体里被解析；哪天有人给渲染器加一句
- * {@code static final RenderType T = RenderType.LINES;}，红掉的是<b>整道 118 条的门</b>而不是那条断言。
+ * {@code static final RenderType T = RenderType.LINES;}，红掉的是<b>整道门（现 128 条）</b>而不是那条断言。
  * 挪到这里之后，本类不 import 任何 MC 类型，门就再也扣不到运气上。
  *
- * <p><b>量纲</b>（这是连两轮审查都在同一处抓到的东西，写死在这儿）：
- * 成本 = <b>稳态活跃粒子数</b> = {@code 每 tick 生成率 × 粒子自身寿命}。
- * 三个"寿命"是不同的量，别混：
+ * <p><b>量纲</b>（这条轴连错四轮，写死在这儿）：成本 = <b>场上峰值存活数</b> =
+ * {@code 每 tick 生成率 × 粒子自身寿命}。四个时间量必须分开，别混：
  * <ul>
  *   <li>{@code particleLife}：粒子自己在场上活几 tick（{@link #DUST_LIVE_TICKS} /
- *       {@link #SPARK_LIVE_TICKS}，从 vanilla 原文回读）——<b>成本用这个</b>；</li>
- *   <li>{@code remainingTicks}：这一发轮廓还剩几 tick 停止发射（{@code end - now}）——
- *       <b>公平性与"多久把圈铺满"用这个</b>；</li>
- *   <li>整发寿命 {@code end - start}：只在"这一发的总账"里才有意义，既不是成本也不是铺满窗口。</li>
+ *       {@link #SPARK_LIVE_TICKS}，从 vanilla 原文回读）——<b>成本与覆盖都除以它</b>；</li>
+ *   <li>{@code elapsed}（{@code now - start}）：这颗圈<b>已经</b>撒了几 tick——决定当前真实存活
+ *       （{@code min(粒子寿命, elapsed) × 率}），所以记账用"率 × 粒子寿命"是<b>峰值</b>口径，
+ *       在出生的头几 tick 会略微高报，这个方向的误差是安全的；</li>
+ *   <li>{@code remaining}（{@code end - now}）：还剩几 tick 停止发射——<b>不进成本</b>。
+ *       轮 19 P2-1 抓到的正是把它当成本因子：那数的是"还要撒几个"，而只剩 1 tick 的大圈
+ *       实际还占着 197 个场上粒子，记成 5 个就把全局闸绕过去了（低报 39 倍）；</li>
+ *   <li>整发寿命 {@code end - start}：只用于到期与淡出（{@code TelegraphZone.lifetimeTicks()}）。</li>
  * </ul>
+ * 另一个好处：率与槽位现在都是<b>每发常量</b>，不再逐 tick 变化 ⇒ 轮转的相位不会跳、
+ * 角位映射不会重排（轮 19 P2-1 的副产物一并消失）。
  */
 public final class TelegraphBudget {
 
@@ -38,8 +43,10 @@ public final class TelegraphBudget {
      * {@code getParticleGroup()} 非空的粒子查容量（dust/END_ROD 都不在任何 group 里），
      * 而框架用 {@code force=true} 又短路掉了 {@code LevelRenderer:2509-2514} 那两道事实上的闸。
      *
-     * <p>额度不够时<b>先登记的先满足</b>（{@code TelegraphClient.ZONES} 是插入序）：按距离排序要每帧
-     * 分配并排一个数组，而这条闸存在的理由正是"别为了精确公平再引入新的成本"。
+     * <p>额度不够时<b>按"最近一次投影变化"的顺序满足</b>（{@code TelegraphClient.ZONES} 是插入序，
+     * 而每次快照变化都会先 {@code dropOwner} 再整批重插 ⇒ 这个顺序表达的是"最近被重投"，
+     * <b>不是</b>"最先登记"——轮 19 P3-7 把先前那句"先登记的先满足"改准）。按距离排序要每帧分配
+     * 并排一个数组，而这条闸存在的理由正是"别为了精确公平再引入新的成本"。
      */
     public static final int MAX_LIVE_GLOBAL = 2000;
 
@@ -75,20 +82,11 @@ public final class TelegraphBudget {
         return SPARK_VISUAL.equals(visual) ? SPARK_LIVE_TICKS : DUST_LIVE_TICKS;
     }
 
-    /**
-     * 这一发<b>还剩</b>几 tick 会停止发射（{@code end - now}，钳到 {@code 0..上限}）。
-     *
-     * <p>钳在这里而不是让调用方各自 {@code (int)(end - start)}（轮 18 P3-4）：{@code start}/{@code end}
-     * 是两个裸 long，坏存档给 {@code end - start = 2^32-1} 时 {@code (int)} 截断会变成<b>负数</b>，
-     * 于是"寿命"这侧的所有除法语义全废。上限取 {@code TelegraphZone.MAX_WARN_TICKS + FADE_TICKS}
-     * ＝服务端能登记的最大值，再多就是坏数据。
-     */
-    public static int remainingTicks(long endGameTime, long nowGameTime) {
-        long remaining = endGameTime - nowGameTime;
-        if (remaining <= 0L) return 0;
-        return (int) Math.min(remaining, com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS
-                + com.klze.colossus.env.TelegraphZone.FADE_TICKS);
-    }
+    // 轮 19 P3-2/P3-4 一并解决：原先这里有个 remainingTicks(end, now) 把 span 钳到
+    // MAX_WARN_TICKS + FADE_TICKS，用来防 (int)(end - start) 截断成负数。签名改掉之后
+    // <b>没有任何地方再把 span 转成 int</b>（progress 走 double 除法、到期比较走 long 减法），
+    // 那道钳与它"1210 就是最大值"的假口径一起删掉——showTelegraph 允许调用方给更长寿命，
+    // 那句话与它冲突（轮 19 P3-2）。截断危险由"不存在转换"消除，而不是由一个数字上限掩盖。
 
     /** 视觉密度：圆周长 → 想要的槽位数（{@code 8..96}；NaN/0 走下限）。 */
     public static int ringSlotCount(double circumference) {
@@ -98,30 +96,44 @@ public final class TelegraphBudget {
     }
 
     /**
-     * 一条轮廓这一 tick 的预算。
+     * 一条轮廓这一 tick 的预算。<b>刻意不接受"剩余时间"这类会变的时间量</b>（轮 19 P2-1 的修法）：
+     * 上一版把成本记成 {@code 率 × min(粒子寿命, 剩余 tick)}，那数的是"这颗圈<b>还要</b>撒几个"，
+     * 而闸要限的是"场上<b>有</b>几个"——两者只差一个时间方向（未来 vs 过去），
+     * 于是只剩 1 tick 的大圈被记 5 个、实际场上站着 197 个（低报 39 倍），全局闸形同没有。
+     * 现在率、槽位、成本三个量都只依赖<b>每发常量</b>（周长、粒子寿命），
+     * 因此"记的账"与"峰值存活"是同一个式子，且逐 tick 不变（自检正是钉这条不变性）。
+     *
+     * <p>顺带修掉两个副作用：槽位不再逐 tick 收缩（轮 19 P2-1 的"相位跳变"与"角位映射重排"随之消失）；
+     * {@code byGlobal} 的除数与入账的乘数<b>同一个量</b>（都是粒子寿命），不再一个用 life 一个用 window。
      *
      * @param circumference  圆周长（决定想要的密度）
-     * @param remainingTicks 这一发<b>还剩</b>几 tick 停止发射（不是整发寿命，见类注释）
-     * @param particleLife   {@link #particleLifeTicks} 的结果
+     * @param particleLife   {@link #particleLifeTicks} 的结果（<b>粒子</b>自己活几 tick）
      * @param globalRemaining 全局天花板还剩多少；≤0 ⇒ 返回 {@link Outline#NONE}（本条不画）
      */
-    public static Outline plan(double circumference, int remainingTicks, int particleLife, int globalRemaining) {
+    public static Outline plan(double circumference, int particleLife, int globalRemaining) {
         int life = Math.max(1, particleLife);
-        int window = Math.min(life, Math.max(1, remainingTicks)); // 多久把圈铺满：粒子寿命与剩余时间里短的那个
         int want = ringSlotCount(circumference);
-        int byOutline = Math.max(1, MAX_LIVE_PER_OUTLINE / life); // 定义反解：率 = 存活上限 / 粒子寿命
-        int byGlobal = Math.max(0, globalRemaining / life);       // 剩余额度折算成"每 tick 几个"
+        int byOutline = MAX_LIVE_PER_OUTLINE / life; // 定义反解：率 = 存活上限 / 粒子寿命（<b>不</b>加地板 1） // 定义反解：率 = 存活上限 / 粒子寿命（<b>不</b>加地板 1）
+        int byGlobal = Math.max(0, globalRemaining) / life;
         int budget = Math.min(byOutline, byGlobal);
+        // 付不起一个 tick 一发（粒子寿命比上限还长）就不画，而不是"至少发一个"——后者会让
+        // 单条就超上限（life=300 时 1×300 > 240）。今天 particleLifeTicks 只可能给 48/71 所以不显形，
+        // 但这条边界必须有判据（轮 19 P2-2 的第③条）。
         if (budget <= 0) return Outline.NONE;
-        int need = (want + window - 1) / window;                  // 铺满 want 个槽位所需的最小率
+        // 覆盖要求：每个角位都要在"上一发还没消失"之前被重新照亮 ⇒ slots / 率 <= 粒子寿命。
+        // 于是"圈合得上"的真正判据是 <b>slots ≤ 率 × 粒子寿命</b>，与这颗圈还剩几 tick 无关（轮 19 设计偏差第 2 条）。
+        int need = (want + life - 1) / life;
         int rate = Math.min(Math.max(need, 1), budget);
-        // 预算铺不满想要的密度时就少画几个角位，而不是画一整圈的 1/5 弧——"合不上圈"的根因在这里：
-        // 槽位数必须与预算一起降，否则玩家看到的是几段螺旋而不是一圈（轮 18 P2-1 的反方向那一半）。
-        int slots = Math.min(want, Math.max(rate, rate * window));
-        if (rate > slots) rate = Math.max(1, slots);              // 同一 tick 不重复同一个角位
-        // 峰值存活数＝率 × 实际发射的时长（粒子寿命与剩余时间里的短的那个）：
-        // 还剩 2 tick 的旧圈不该和刚登记的圈占同样多的额度（轮 18 P2-1 的公平性那一半）。
-        return new Outline(slots, rate, rate * window);
+        int slots = Math.min(want, rate * life);
+        return new Outline(slots, rate, rate * life);
+    }
+
+    /**
+     * 这颗圈<b>任意时刻</b>在场上最多占几个粒子——与 {@link Outline#liveCost()} 同一个式子，
+     * 单独成一个函数只为让自检能把它写成"轨迹上每一点都不低于真实存活"这种断言。
+     */
+    public static int peakAlive(int ratePerTick, int particleLife) {
+        return Math.max(0, ratePerTick) * Math.max(1, particleLife);
     }
 
     private TelegraphBudget() {}

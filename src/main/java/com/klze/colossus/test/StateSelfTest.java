@@ -553,43 +553,55 @@ public final class StateSelfTest {
                         && com.klze.colossus.env.TelegraphZone.DEFAULT_VISUAL.equals(
                         com.klze.colossus.env.TelegraphZone.visualOrDefault(" \t "))
                         && "ring".equals(com.klze.colossus.env.TelegraphZone.visualOrDefault("ring")));
-        // 稳态活跃粒子 = 每 tick 生成率 × <b>粒子自身寿命</b>（轮 18 P2-1：轮 17 那版拿的是"圈剩余寿命"，
-        // 于是 warn=0 的速发圈（圈只活 11t、dust 粒子活到 48t）被记成 11 tick 的账、实际场上站 48 tick）。
-        // 这几条断言全部走 env/TelegraphBudget——它不 import 任何 MC 类型，所以最快的那道门能跑到它们
-        // （轮 18 设计偏差第 2 条：式子原先住在 TelegraphClient 里，自检因此开始链接客户端类）。
-        boolean costHolds = true;
-        boolean ringCloses = true;
-        for (int remaining : new int[]{1, 2, 11, 40, 70, 110, 240, 1210}) {
-            for (int life : new int[]{com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS,
-                    com.klze.colossus.env.TelegraphBudget.SPARK_LIVE_TICKS}) {
-                for (double radius : new double[]{0.5, 6.0, 30.0, 256.0}) {
-                    var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * radius, remaining,
-                            life, com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL);
-                    if (plan.empty()) { costHolds = false; continue; }
-                    // ① 成本：峰值存活数不许超单条上限
-                    costHolds &= plan.liveCost()
-                            <= com.klze.colossus.env.TelegraphBudget.MAX_LIVE_PER_OUTLINE;
-                    // ② 圈要合得上：发出去的槽位数覆盖得到 slots 个角位（否则玩家看到的是几段螺旋）
-                    ringCloses &= plan.ratePerTick() >= 1 && plan.slots() >= plan.ratePerTick()
-                            && (long) plan.ratePerTick() * Math.min(life, remaining) >= plan.slots();
+        // 成本 = 每 tick 生成率 × <b>粒子自身寿命</b>（轮 19 P2-1：轮 18 那版乘的是"还剩几 tick"，
+        // 数的是未来发射而不是场上存活——只剩 1 tick 的大圈被记 5 个、实际场上站着 197 个）。
+        // 下面这套断言的设计要求是"改错必须变红"（轮 19 P2-2：上一批新写的两条一条恒真、一条单向）。
+        final int BUDGET = com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL;
+        final int CAP = com.klze.colossus.env.TelegraphBudget.MAX_LIVE_PER_OUTLINE;
+        boolean costIsPeakAlive = true;   // ①记账 == 峰值存活
+        boolean coversRing = true;        // ②圈合得上（slots ≤ 率 × 粒子寿命）
+        boolean neverUnderBooks = true;   // ③轨迹上每一点都不低报（这条才真抓住 P2-1）
+        for (int life : new int[]{com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS,
+                com.klze.colossus.env.TelegraphBudget.SPARK_LIVE_TICKS}) {
+            for (double radius : new double[]{0.5, 6.0, 30.0, 256.0}) {
+                var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * radius, life, BUDGET);
+                if (plan.empty()) { costIsPeakAlive = false; continue; }
+                costIsPeakAlive &= plan.liveCost()
+                        == com.klze.colossus.env.TelegraphBudget.peakAlive(plan.ratePerTick(), life)
+                        && plan.liveCost() <= CAP;
+                coversRing &= plan.slots() >= plan.ratePerTick()
+                        && (long) plan.ratePerTick() * life >= plan.slots();
+                // 逐 tick 推演这颗圈的一生：第 t tick 场上真的有 min(life, t+1) × 率 个粒子
+                // （早于出生的那些还没发）。旧实现记的是 率 × 剩余，尾段必然低于这个数。
+                for (int span : new int[]{11, 40, 1210}) {
+                    for (int tick = 0; tick < span; tick++) {
+                        int alive = plan.ratePerTick() * Math.min(life, tick + 1);
+                        neverUnderBooks &= plan.liveCost() >= alive;
+                    }
                 }
             }
         }
-        check("particle cost stays under the per-outline cap in live-particle units (rate x particle life)",
-                costHolds);
-        check("the drawn outline closes (budget never leaves an unfilled ring)", ringCloses);
+        check("particle ledger books the PEAK alive count (rate x particle life), not future emissions",
+                costIsPeakAlive);
+        check("the drawn outline closes (slots <= rate x particle life)", coversRing);
+        check("booked cost is >= the ring's real on-screen population at every tick of its life",
+                neverUnderBooks);
+        // 粒子寿命长到"一发就超上限"时必须不画，而不是"至少发一个"（轮 19 P2-2 第③条）
+        check("a particle whose own life exceeds the cap makes the outline draw nothing at all",
+                com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 300, BUDGET).empty()
+                        && com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 241, BUDGET).empty()
+                        && !com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 240, BUDGET).empty());
         int booked = 0;
         int funded = 0;
         for (int i = 0; i < 40; i++) { // 40 条同放（> HARD_MAX_TELEGRAPHS，故意压满）
-            var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0, 70,
-                    com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS,
-                    com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL - booked);
+            var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0,
+                    com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS, BUDGET - booked);
             if (plan.empty()) continue;
             booked += plan.liveCost();
             funded++;
         }
         check("the global ledger never books more than the cap, and the tail of the batch gets nothing",
-                booked <= com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL && funded > 0 && funded < 40);
+                booked <= BUDGET && funded > 0 && funded < 40);
         check("outline density is a per-tick-independent band (small ring 8, huge 96, NaN 8)",
                 com.klze.colossus.env.TelegraphBudget.ringSlotCount(0.5) == 8
                         && com.klze.colossus.env.TelegraphBudget.ringSlotCount(2 * Math.PI * 256) == 96
@@ -605,18 +617,9 @@ public final class StateSelfTest {
                                 == com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS
                         && com.klze.colossus.env.TelegraphBudget.particleLifeTicks(null)
                                 == com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS);
-        // 两个裸 long 不进任何钳的代价（轮 18 P3-4）：坏存档给 2^32-1 的 span，(int) 截断成负数
-        // 就会把"寿命"这侧的除法全部作废，变成一台满速撒粒子且不消失的机器。
-        check("remaining ticks survive a corrupt span and never go negative",
-                com.klze.colossus.env.TelegraphBudget.remainingTicks(
-                        (1L << 32) - 1, 0L)
-                        == com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS
-                                + com.klze.colossus.env.TelegraphZone.FADE_TICKS
-                        && com.klze.colossus.env.TelegraphBudget.remainingTicks(Long.MAX_VALUE, 0L)
-                                == com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS
-                                        + com.klze.colossus.env.TelegraphZone.FADE_TICKS
-                        && com.klze.colossus.env.TelegraphBudget.remainingTicks(-5L, 10L) == 0
-                        && com.klze.colossus.env.TelegraphBudget.remainingTicks(10L, 10L) == 0);
+        // 轮 19 P3-4 的那条"两个裸 long 不进钳 ⇒ (int)(end-start) 截成负数"不再需要一个判据：
+        // 预算签名改掉之后<b>没有任何地方把 span 转成 int</b>（progress 走 double 除法、
+        // 到期比较走 long 减法），危险面是"少了一次转换"消除的，不是靠一个上限数字掩盖的。
 
         // 偏移判据按**范数**而不是分量（轮 18 P3-1：逐分量会让 (2048,2048) 两条都"合法"、
         // 实际偏移 2896.3，比上限宽 √2 倍，而规格与回执文案写的都是"≤ 2048"）
@@ -636,6 +639,17 @@ public final class StateSelfTest {
         for (int i = 0; i < 500; i++) com.klze.colossus.env.OncePerKey.firstTime("flood" + i);
         check("the notice latch fires once per key and stays bounded under a flood of distinct keys",
                 latchHolds && com.klze.colossus.env.OncePerKey.size() <= 64);
+        // 真 LRU 而不是插入序（轮 19 P3-3）：反复命中的热键被灌入新键冲刷后<b>不该</b>再响一次。
+        // 上一版用默认 LinkedHashMap（插入序）时这条会红——热键的位置从不更新，必然被滚出窗口。
+        com.klze.colossus.env.OncePerKey.reset();
+        com.klze.colossus.env.OncePerKey.firstTime("hot");
+        for (int i = 0; i < 63; i++) com.klze.colossus.env.OncePerKey.firstTime("fill" + i);
+        for (int round = 0; round < 3; round++) {
+            com.klze.colossus.env.OncePerKey.firstTime("hot"); // 命中即刷新访问序
+            for (int i = 0; i < 40; i++) com.klze.colossus.env.OncePerKey.firstTime("flood" + round + "_" + i);
+        }
+        check("a repeatedly-hit notice key survives the flood window instead of being evicted by insertion order",
+                !com.klze.colossus.env.OncePerKey.firstTime("hot"));
         com.klze.colossus.env.OncePerKey.reset();
         // view tag 缺件必须整条丢，而不是读成"世界原点一个 1 格圈"（轮 18 P3-3：
         // CompoundTag 的 getDouble/getString 对缺失返回 0/""、不抛）
@@ -644,6 +658,22 @@ public final class StateSelfTest {
         partial.putLong("start", 100L);
         partial.putLong("end", 140L);
         partial.putDouble("rXZ", 4.0); // 只有半径，其余缺
+        // 闸门不许比读侧更严（轮 19 P3-4）：CompoundTag 的三个 getter 走 mask=99，
+        // /data modify 给的 IntTag 与 putFloat 的 FloatTag 本来都读得出来；用精确类型会把它们判成缺件。
+        var floatTyped = new net.minecraft.nbt.CompoundTag();
+        floatTyped.putFloat("cx", 1f); floatTyped.putFloat("cy", 2f); floatTyped.putFloat("cz", 3f);
+        floatTyped.putFloat("rXZ", 4f); floatTyped.putFloat("rY", 1f);
+        floatTyped.putInt("warn", 20); floatTyped.putInt("color", 0);
+        floatTyped.putString("visual", "dust");
+        var intTypedView = new net.minecraft.nbt.CompoundTag();
+        intTypedView.put("zone", floatTyped.copy());
+        intTypedView.put("burst", new net.minecraft.nbt.CompoundTag()); // 空 burst 也要齐件：三个键都给
+        net.minecraft.nbt.CompoundTag burstKeys = new net.minecraft.nbt.CompoundTag();
+        burstKeys.putFloat("damage", 3f); burstKeys.putFloat("knockback", 0f); burstKeys.putInt("freeze", 0);
+        intTypedView.put("burst", burstKeys);
+        check("a numeric tag stored as Float/Int still counts as complete (the gate must not be stricter than the getters)",
+                com.klze.colossus.env.TelegraphZone.hasRequiredKeys(floatTyped)
+                        && com.klze.colossus.env.ZoneWork.settleRejectReason(intTypedView) == null);
         check("a view tag missing geometry keys is rejected outright instead of reading as a 1-block ring at origin",
                 !com.klze.colossus.env.TelegraphZone.hasRequiredKeys(partial)
                         && com.klze.colossus.env.TelegraphZone.hasRequiredKeys(

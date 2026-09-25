@@ -12,18 +12,21 @@ import java.util.Map;
  * （{@code ColossusBossEntity.telegraphCapWarned} 的每实例一次、{@code telegraphFullWarnedAt} 的 100t 桶），
  * 但这一个住在 record 的静态工具面上、没有实例可挂旗标，所以去重状态必须有、且必须<b>有界</b>。
  *
- * <p>上限 {@value #MAX_KEYS} 个键、LRU 逐出：坏数据（例如每 tick 换一个 {@code bossId} 的调用方）
+ * <p>上限 {@value #MAX_KEYS} 个键、按最近使用逐出（真 LRU，见下面那台 map 的 accessOrder）：坏数据（例如每 tick 换一个 {@code bossId} 的调用方）
  * 最多把它滚动使用，不会让它无限长。这是"配置期回执"用的，不是运行期计数器——不追求精确统计条数。
  */
 public final class OncePerKey {
 
     private static final int MAX_KEYS = 64;
 
-    private static final LinkedHashMap<String, Boolean> SEEN = new LinkedHashMap<>();
+    // accessOrder=true：命中即刷新到队尾，逐出的才是"最久没再出现"的那个。
+    // 上一版用默认的插入序，却在三处文档里写"LRU"——差别是能现形的：一个反复命中的热键
+    // 会被 64 个新键滚掉、然后再响一次，"每键只响一次"退化成"每 64 键窗口一次"（轮 19 P3-3）。
+    private static final LinkedHashMap<String, Boolean> SEEN = new LinkedHashMap<>(16, 0.75f, true);
 
-    /** 第一次见这个键返回 true（并登记）；之后一律 false。 */
+    /** 第一次见这个键返回 true（并登记）；之后一律 false。命中会刷新"最近使用"时刻。 */
     public static synchronized boolean firstTime(String key) {
-        if (SEEN.containsKey(key)) return false;
+        if (SEEN.get(key) != null) return false;   // 必须用 get：containsKey 不刷新访问序
         while (SEEN.size() >= MAX_KEYS) {
             java.util.Iterator<Map.Entry<String, Boolean>> it = SEEN.entrySet().iterator();
             if (it.hasNext()) { it.next(); it.remove(); } else break;

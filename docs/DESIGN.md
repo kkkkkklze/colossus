@@ -106,10 +106,16 @@ protected void registerMoves(MoveSetBuilder m) {
 第二条通道是 **`DATA_TELEGRAPHS`（`EntityDataSerializers.COMPOUND_TAG`）**——在途危险区的投影，
 形态 `{views:[{cx,cy,cz,rXZ,rY,warn,color,visual,id,start,end}]}`，`start/end` 是**绝对 gameTime**（第二十四批改的根据：
 vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份全量快照，中途进场/重进世界/存档重载三条都不用写补包代码）。
-它不是"随便一个标签"，载荷有硬界：**一条 view 按 wire 口径约 148 B（11 个键，每键 1 B 类型 + 2 B 名长 + 名 + payload；
-轮 18 P3-5 把我先前那句"140 B"按实际键表重算过），`HARD_MAX_TELEGRAPHS = 32` 条 ⇒ 一轮全量广播 ≤ ~4.7 KiB**，
-离 `FriendlyByteBuf` 的 2 MiB NBT 配额（`DEFAULT_NBT_QUOTA = 2097152`，`readNbt()` 就用它建 `NbtAccounter`）
-差 **2.6 个数量级**（443 倍；先前写"三个数量级"是四舍五入过头，轮 18 P3-5 改正）；默认同时在地上的条数是 `MAX_ACTIVE_TELEGRAPHS = 8`，
+它不是"随便一个标签"，载荷有硬界，但**大小有两个不同的口径**（轮 19 P3-9：先前只写了一个，还拿它去比配额）：
+- **wire**（网络上实际字节）：一条 view 11 个键 ≈ **144 B** ⇒ 32 条 ≈ **4.7 KiB**。
+- **配额计费**（`NbtAccounter#accountBytes`，才是撞 2 MiB 时看的那个量）：`CompoundTag.load` 每个 compound
+  收 48（`CompoundTag.java:34`），每个条目再收 `28 + 2·名长`（`:43`）+ Forge 的 4（`:44`）+ 新键 36（`:47`），
+  值本身 `DoubleTag:13`=16 / `IntTag:11`=12 / `LongTag:11`=16 / `StringTag:14`=36+UTF ⇒ 一条 view ≈ **1.06 kB**，
+  是 wire 的 **7 倍**。
+`FriendlyByteBuf:599` 用 `new NbtAccounter(2097152L)`（`DEFAULT_NBT_QUOTA`）建账号，所以按配额口径
+32 条 ≈ 34.7 kB ⇒ **离 2 MiB 只差 60 倍（1.8 个数量级）**，不是 443 倍；真要把配额撞满需要 ≈3100 条，
+而不是我先前说的"一万五千条"。上限仍然站得住（`HARD_MAX_TELEGRAPHS = 32` 离撞线差两个数量级），
+但**引用哪个口径必须写清**——这正是上一轮批"四舍五入过头"的同一族错误。；默认同时在地上的条数是 `MAX_ACTIVE_TELEGRAPHS = 8`，
 子类按 `maxActiveTelegraphs()` 抬，抬出去的值还要过 `clampTelegraphCap()`（钳到 `1..32`，越界一次性 warn）。
 为什么下界是 1 而不是 0：`0` 会让 `size() >= cap` 恒真 ⇒ 这个 Boss **所有带预警的招一招不落**，
 而"关掉投影却仍落伤害"＝制造没预警的攻击，那比少一格容量严重得多（轮 17 设计偏差第 2 条的裁决，
@@ -170,15 +176,19 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 1. **TelegraphZone**（两形态）：数据形态（BR IceSpike：区域由 delay 标量推导，零包，到期 AABB 一次性结算）与实体形态（CAT LightningArea：可扩散、周期结算）。触发时刻由 `MoveDef` 帧表声明——BR 依赖的 GeckoLib 关键帧指令在我们的状态机里有现成等价物。客户端契约（第二十四批改过）：轮廓形状住在 Boss 的 `DATA_TELEGRAPHS`（一份`{views:[{几何…, id, start, end}]}` 的 SynchedEntityData 标签），渲染在 `RenderLevelStageEvent` 画贴地 quad，粒子档走 `addAlwaysVisibleParticle`。旧的 `ZoneSync` 单发包已删除——理由见 §7 第二十四批。
 
    **形状侧的边界值（规格正文，不只在 javadoc 里——轮 17 设计偏差第 1 条）**。全部钳在 `TelegraphZone` 的规范构造器，
-   因为同一个 `radius` 会被三条路各自放大成事故（粒子档每 tick 生成数、几何档**每帧 `12πr` 顶点**——
-   `segs = 2πr·3` 是**段**数、每段两个顶点，轮 17 P3-8 把先前"6πr"那个说小了 2 倍的口径改准；
-   以及服务端 `getEntitiesOfClass(巨大 AABB)` 的扫场：`EntitySectionStorage:34-62` 的 x 方向循环在 1.20.1 **没有体积护栏**，
-   `r=1e9` 是 1.25 亿次外层循环＝服务端线程挂死）。
+   因为半径会放大成事故。但"放大成什么样的事故"要按现实现说（轮 19 P3-8 把这里从"三条路"改回**一条**）：
+   - **服务端扫场随 r 放大，且没有护栏**：`getEntitiesOfClass(box())` → `EntitySectionStorage:35-62` 的 x 方向
+     `for(l1=j; l1<=i1; ++l1)` 在 1.20.1 **不查体积**（全 jar 无 `Area radius too large` 之类），
+     `r=1e9` 是 1.25 亿次外层循环＝服务端线程挂死。**这是 MAX_RADIUS 存在的真理由。**
+   - 几何档**不**随 r 放大：`RingZoneRenderer` 的 `segs = Mth.clamp((int)(2πr·3), 24, 768)` 在进循环**之前**就封顶
+     （r=256 ⇒ 1536 顶点；`r=1e9` 时 `(int)` 饱和成 `Integer.MAX_VALUE` 也仍被钳到 768）。所以"每帧 `12πr` 顶点、
+     42 亿顶点卡死"这个说法在钳位存在的前提下**已经不成立**，留着会让人误以为 768 那道封顶可有可无。
+   - 粒子档也**不**随 r 放大：槽位数上限 96、生成率上限 `240 / 粒子寿命 = 5`，两者都与 r 无关（r 只影响每点间隔）。
 
    | 量 | 界 | 超了怎样 |
    |---|---|---|
-   | `radiusXZ` / `radiusY` | `(0, MAX_RADIUS=256]`，NaN/≤0 回落 `1.0` | JSON：`circle_ahead.radius` 字段级拒；DSL：一次性 warn + 钳；坏存档：静默钳 |
-   | `warnTicks` | `[0, MAX_WARN_TICKS=1200]`（60 s；`Integer.MAX_VALUE` 会让 `settle`/`lifetime` 双双溢出） | 同上三档 |
+   | `radiusXZ` / `radiusY` | `(0, MAX_RADIUS=256]`，NaN/≤0 回落 `1.0` | JSON 字段级拒；DSL 一次性 warn + 钳；坏存档静默钳；**手搓 record 静默钳**（第四条入口，见下） |
+   | `warnTicks` | `[0, MAX_WARN_TICKS=1200]`（60 s；`Integer.MAX_VALUE` 会让 `settle`/`lifetime` 双双溢出） | 同**四**档 |
    | `forward` / `side`（圈心相对 Boss 的偏移） | 有限且 `hypot(forward,side) ≤ MAX_AHEAD_OFFSET=2048`（**按范数**，轮 18 P3-1：逐分量判会让 `(2048,2048)` 两条都合法、实际 2896.3） | JSON 字段级拒；DSL 一次性 warn + **按比例缩**（保方向） |
    | `cx/cy/cz`（绝对圈心） | 有限且逐分量 `≤ MAX_CENTER_ABS`（取 vanilla `WorldBorder.MAX_CENTER_COORDINATE = 2.9999984E7`，与 `absoluteMaxSize = 29999984` **同值**；该常量在本版本声明后无人使用，与 `ParticleEngine.MAX_PARTICLES_PER_LAYER` 同一类死常量） | 只钳不打（炸在 `readAdditionalSaveData`／渲染路径＝区块一加载就崩） |
    | `visual` | 非空字符串；`null`/空/全空白 → `DEFAULT_VISUAL="dust"`。**已知键**：`dust`（默认粒子）/ `TelegraphBudget.SPARK_VISUAL="spark"`（END_ROD，成本约 3.6 倍）/ `ring`（内置线框渲染器）/ 第三方 `registerStyle` 的 id | 判据只有 `visualOrDefault` 一份（轮 17 P3-11 之前是 `isEmpty`/`isBlank` 两套）；**未知名字静默按 `dust` 画**（轮 18 P2-3 之后不再静默变贵，但仍不额外报——拼错样式名不是"战斗结果错"） |
@@ -791,7 +801,9 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > 【轮 18 更正】：这一句引用了一段**从未提交**的中间稿——`git grep MAX_PARTICLES_PER_OUTLINE 615f449` 0 命中、`git log -S "* 20 / lifetime" --all` 只有本提交自己。已提交的 `615f449` 真实形态是`points = min(96, max(8, 2πr·1.5))` 每 tick 画满整圈、与寿命无关 ⇒ dust 稳态 ≈1.7k 存活/条、错名走 END_ROD ≈6.3k/条，**比这里说的更糟**。措辞于第二十九批改准（轮 18 P2-2）。
 > 现在按定义反解 `生成率 = 上限 / 寿命`，并把"每 tick 撒几个"与"一圈分几段"拆成 `outlineSlotRate` / `ringSlotCount`
 > 两个 **public static 纯函数**（槽位随 tick 轮转，长命圈这才合得上），另加一条合计闸
-> `GLOBAL_LIVE_PARTICLE_CAP = 2000`：每 tick 按 `槽位 × 寿命` 记账，先登记的先满足，后面的只拿剩余额度。
+> `GLOBAL_LIVE_PARTICLE_CAP = 2000`：每 tick 按 `率 × 整发寿命` 记账（轮 19 P2-3 订正：`b0147e3` 原文是
+> `liveParticleEstimate += rate * lifetime`，所以单条账其实 ≤240、上界没被拆；真正的错处是"寿命"取了
+> 圈寿命而不是<b>粒子自身寿命</b>），先登记的先满足，后面的只拿剩余额度。
 > ②几何档顶点数从"6πr"改准成 **12πr/帧**（`segs = 2πr·3` 是段数、每段两顶点）。
 > ✅ 上一批改动的连带断腿补上：`clear()` 不再清名单 ⇒ `forgetTelegraphMemo()` 只剩 `watch()` 一个调用点，
 > 同一图内调 `clear()` 后 `snapshot == memo` 恒成立、轮廓冻结到服务端下次 publish，而待办那发照落＝没预警的伤害。
@@ -848,9 +860,52 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > 每点间隔 r≈30.6 超 2 格）；"三个数量级"→ 2.6（443 倍）；"4 倍多"→ 均值 3.6 倍；
 > `equals/hashCode` 比较**钳后值**这件事真的写进了表里（上一版处置表说"已写"，实际没写）。
 > ⬜ 未做：`renderZones`（几何档）仍不进任何账——同一发在粒子档有成本上限、在 `ring` 档只受 `segs ≤ 768` 约束，
-> 两者之间没有合计闸；`warn=0` 速发圈一次爆发 240 个粒子的尖峰由**生成率**而非总量约束，本批没再收紧；
+> 两者之间没有合计闸；**post-mortem 滞留**：圈从 `ZONES` 移除之后，它此前撒下的粒子还要再活最多
+> `粒子寿命 - 1` tick（dust 47 / spark 70），而那本账在移除那一 tick 就清零了（轮 19 遗留）；
+> 另注：`MAX_LIVE_GLOBAL = 2000` 在**默认配置下永不启用**（默认 8 条 × 240 = 1920 < 2000），
+> 抬到硬上界 32 条时真实天花板是 `32 × 240 = 7680`——两个上限互不自洽，这道闸只在"多 Boss + 有人抬过 cap"
+> 之后才咬人，先咬住的是单条 240（轮 19 P2-1 第③点）；
+> ~~`warn=0` 速发圈一次爆发 240 个粒子~~（轮 19 P3-10 撤回：`率 ≤ 240/粒子寿命 = 5`，
+> 任何单 tick 都撒不出 240，240 是**长命圈的稳态**；这条错话会把下一轮引向错误的收紧方向）；`warn=0` 速发圈一次爆发 240 个粒子的尖峰由**生成率**而非总量约束，本批没再收紧；
 > `ZoneWork` 扫场成本的独立上限、状态栈快照、跨招关系三件原语（v13 新线索：韧性/打断这条轴在库里几乎只有
 > 一个样本，`[首领崛起]` 用"招式自报层数 + 两级分岔"，见 `深挖__BOSS引擎调研v13__韧性打断与破势取证.md`）
 > 与 `DATA_DEATH_TICK`、许可证仍 ARR。
 > 验证：build（`-Pgecko`）+ 自检 **125/125**（118→125，站点 77+41 → 84+41）+ audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。
+
+> 进度（2026-09-26 第三十批·审查轮 19 处置：**记账记的是"还要撒几个"，不是"场上有几个"**）：
+> ✅ 成本的时间方向改对：`plan` 的签名里**删掉所有会随时间变的量**，率/槽位/成本只依赖每发常量
+> （周长与粒子寿命），于是 `liveCost = 率 × 粒子寿命` 与 `byGlobal` 的除数是同一个量，且逐 tick 不变。
+> 上一版按 `率 × min(粒子寿命, 剩余)` 记的是"未来还要发射多少"，而闸要限的是"场上现在有多少"——
+> 只剩 1 tick 的 r=256 大圈被记 5 个、实际站着 197 个（低报 39 倍），全局闸被时序整体绕过。
+> 连带消失的两个副产物：槽位不再逐 tick 收缩（轮转相位跳变与角位重排都是这个记账错误的症状）；
+> `remainingTicks` 整个方法删除——`(int)(end-start)` 截断的危险由"不再做这次转换"消除，
+> 而不是靠一个与 `showTelegraph` 允许任意 `ticks` 相冲突的假上限掩盖（轮 19 P3-2/P3-4）。
+> ✅ `byOutline` 去掉地板 1：粒子寿命长到"一发就超上限"时返回 `NONE`（不画）而不是"至少发一个"。
+> ✅ 断言有了牙，并且**本轮第一次自己做了变异抽查**（三次都按预期变红、随后还原）：
+> MUT-A `mask=99` 改回精确类型 ⇒ 跨类型齐件那条红；MUT-B 把地板 1 放回来 ⇒ `life > 上限` 那条红；
+> MUT-C2 `accessOrder` 改 `false` ⇒ 热键存活那条红（第一次尝试因为写坏编译而"红"，不算数——
+> 变异必须跑起来才算）。新加的"逐 tick 轨迹"断言是本轮真正的判据：旧实现在 `remaining=11` 一档必红。
+> ✅ 其余处置：`OncePerKey` 改成真 LRU（`accessOrder=true` + `get` 命中，`containsKey` 不刷新访问序），
+> 三处"LRU"措辞与实现一致；回执键带上被钳的值（把 400 改成 500 仍然越界会再响一次，轮 19 P3-11）；
+> `hasRequiredKeys` 数值键改用 `mask=99`（与 `getInt/getDouble/getString` 的容忍度同宽，闸门不许比读侧严）；
+> `ZoneBurst.hasRequiredKeys` 补上对称那一半（截断的 burst 原先能过闸、落一个 0 伤害空圈且零日志）；
+> `settleRejectReason` 能吃 null；`scheduleWork` 在**入队处**拒 null 载荷（否则 1.20.1 的
+> `CompoundTag#put` 会在区块落盘时抛 `IllegalArgumentException`，那已经不是调用方能定位的错）；
+> 悬空的"轮 18 P3-9"引用改回轮 17；"先登记的先满足"改成"按最近一次投影变化的顺序"（`dropOwner` 后整批重插）。
+> ✅ P2-3 的措辞订正：四处把第二十八批写成"按 `槽位 × 寿命` 记账"，回读 `b0147e3` 原文是
+> `rate * lifetime`（**率 × 整发寿命**），单条上界其实成立——错处只是"寿命"取错。
+> 我上一批立的 `git log -S` 纪律只跑了一半，这四处就是漏的部分。
+> ✅ §2.4 改成**双口径**：wire ≈144 B/条，而 `NbtAccounter` 计费 ≈1.06 kB/条（每条目 28+2·名长、
+> 新键 +36、Forge +4、值 12~36），所以 32 条离 2 MiB 只差 60 倍（1.8 个数量级）而非 443 倍；
+> §6.3 的"三条路放大成事故"塌成一条（几何档在进循环前就钳到 768 段、粒子档与 r 无关），
+> 只剩服务端扫场随 r 放大；撤回"warn=0 一次爆发 240 个粒子"这条不存在的尖峰。
+> ⬜ 未做（新增/更正）：post-mortem 滞留（圈从 `ZONES` 移除后粒子还要活最多 47/70 tick，账已清零）；
+> `MAX_LIVE_GLOBAL` 在默认配置下永不启用（8×240=1920 < 2000；抬到 32 条时真实天花板 7680，两个上限不自洽）；
+> 公平性诉求若还要管，得管"发射机会"而不是"账面额度"；`renderZones` 不进任何账；
+> `fromTag` 仍是 public 且不查齐件（本批只写契约，未改成 `fromTagOrNull`）；
+> 任意 `ticks` 会让"本地钟落后一整个寿命才不画"那道闸形同失效（表现层开口）；
+> `ArenaSession` 的 `home_x/entry_x/pos` 是同族裸读（缺键读成 0 ⇒ 回家点落世界原点），不在本批 diff 内；
+> 状态栈快照、跨招三件原语、`DATA_DEATH_TICK`、许可证仍 ARR。
+> 验证：build（`-Pgecko`）+ 自检 **128/128**（125→128，站点集合差精确核过）+ audit **14** +
+> `runGameTestServer` **All 14 required tests passed**（两轮）。

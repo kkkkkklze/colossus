@@ -36,9 +36,13 @@ public final class ZoneWork {
      * 上一批我只在投影解码处加了 {@code hasRequiredKeys}，可结算并不走那条路）。
      */
     public static String settleRejectReason(CompoundTag data) {
+        // 自己也要能吃 null：本函数被文档称作"可自检的纯判据"，而同一批的 hasRequiredKeys
+        // 专门写了 null 分支——同一个"缺件"概念不许两套口径（轮 19 P3-5）。
+        if (data == null) return "no payload";
         if (!(data.get("zone") instanceof CompoundTag zone)) return "no zone payload";
         if (!TelegraphZone.hasRequiredKeys(zone)) return "incomplete zone tag";
-        if (!(data.get("burst") instanceof CompoundTag)) return "no burst payload";
+        if (!(data.get("burst") instanceof CompoundTag burst)) return "no burst payload";
+        if (!ZoneBurst.hasRequiredKeys(burst)) return "incomplete burst tag";
         return null;
     }
 
@@ -59,7 +63,7 @@ public final class ZoneWork {
             Colossus.LOGGER.warn("dropped {} work ({}): boss {}", KIND, reason, boss.getBossId());
             return;
         }
-        CompoundTag zoneTag = data.getCompound("zone");
+        CompoundTag zoneTag = data.getCompound("zone");   // 上面已判过齐件，这里才敢裸取
         CompoundTag burstTag = data.getCompound("burst");
         TelegraphZone zone = TelegraphZone.fromTag(zoneTag);
         var burst = ZoneBurst.fromTag(burstTag);

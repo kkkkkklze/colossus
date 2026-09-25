@@ -46,6 +46,18 @@ public record ZoneBurst(float damage, float knockback, int freezeTicks) {
         return tag;
     }
 
+    /**
+     * 与 {@code TelegraphZone.hasRequiredKeys} 对称（轮 19 P3-6）：闸门只查 zone 那一半时，
+     * "zone 齐件 + burst 被截断"的存档会通过闸门、落一个 0 伤害 0 冰冻的空圈且零日志——
+     * 与要消灭的"排了却没落"是同一个不可诊断形态。不能用 {@code empty()} 代替本判据：
+     * {@code telegraphVisual} 那种"只画不落"的圈本来就合法地全 0。
+     */
+    public static boolean hasRequiredKeys(CompoundTag tag) {
+        if (tag == null) return false;
+        return tag.contains("damage", 99) && tag.contains("knockback", 99)
+                && tag.contains("freeze", 99); // mask=99：与 getter 的数值容忍度同宽
+    }
+
     public static ZoneBurst fromTag(CompoundTag tag) {
         return new ZoneBurst(tag.getFloat("damage"), tag.getFloat("knockback"), tag.getInt("freeze"));
     }

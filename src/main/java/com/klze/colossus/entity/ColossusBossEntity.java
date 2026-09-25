@@ -187,6 +187,15 @@ public abstract class ColossusBossEntity extends Monster {
      * 否则队列满时玩家会看见一块永远不炸的假警告（第二十四批补的门）。
      */
     public boolean scheduleWork(int delayTicks, String kind, CompoundTag data) {
+        // 载荷为 null 必须<b>在这里</b>拒，不能留到落盘：addAdditionalSaveData 走
+        // {@code one.put("data", w.data())}，而 1.20.1 的 {@code CompoundTag#put}（{@code CompoundTag.java:170-172}）
+        // 对 null 抛 {@code IllegalArgumentException} ⇒ 下游一次 {@code scheduleWork(d, kind, null)}
+        // 会变成"区块保存时炸"，那已经不是调用方能定位的错了（轮 19 的"相邻更大一条"）。
+        if (kind == null || data == null) {
+            Colossus.LOGGER.warn("boss {} refused a deferred work with null {} (kind={}, data={})",
+                    this.getBossId(), kind == null ? "kind" : "payload", kind, data == null ? "null" : "ok");
+            return false;
+        }
         if (this.workQueue.size() >= MAX_PENDING_WORK) {
             Colossus.LOGGER.warn("boss {} deferred-work queue full ({} entries) — refusing new {}",
                     this.getBossId(), this.workQueue.size(), kind);
@@ -340,7 +349,8 @@ public abstract class ColossusBossEntity extends Monster {
      * 登记一块危险区并投进同步数据（仅服务端；客户端调用返回"没登记"）。
      *
      * <p>{@code ticks} 是<b>轮廓总寿命</b>（不是"距结算还有几 tick"）。调用方<b>应当</b>直接给
-     * {@link TelegraphZone#lifetimeTicks()}；轮 18 P3-9 之后这条不再只是约定——
+     * {@link TelegraphZone#lifetimeTicks()}；轮 17 P3-9 之后这条不再只是约定——（轮 19 P3-1：这里原先写"轮 18 P3-9"，而轮 18 只有
+     *      P2-1..P2-3 与 P3-1..P3-5；那条兜底是轮 17 的处置表里加的）
      * 实现按 {@code max(ticks, zone.lifetimeTicks())} 兜底，所以 public 面也<b>无法</b>登记一个
      * "比结算先消失"的轮廓（原先这里是唯一能绕过 record 侧不变量的入口，GameTest 传的裸 40
      * 只是恰好等于 warn30 + FADE10）。

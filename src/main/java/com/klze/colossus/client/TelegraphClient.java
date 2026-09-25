@@ -283,7 +283,7 @@ public final class TelegraphClient {
     // 式子为什么搬到 env/（轮 18 设计偏差第 2 条）：这两道闸要在最快的那道门（colossusSelfTest）里
     // 能跑红。留在本类就得链接 RingZoneRenderer -> RenderType 这条链——今天能跑只是因为
     // RenderType 恰好只在方法体里被解析；哪天有人给渲染器加一句 static final RenderType 常量，
-    // 红掉的是整道 118 条的门，而不是那条断言。本类现在只剩"取预算 + 撒粒子"。
+    // 红掉的是整道门（现 128 条）而不是那条断言。本类现在只剩"取预算 + 撒粒子"。
     //
     // 历史口径（轮 18 P2-2 改正：这里先前写了一条不存在的"上一批形态"）：615f449 的真实写法是
     //   points = min(96, max(8, 2*PI*r*1.5))   每 tick 画满整圈、与寿命完全无关
@@ -309,14 +309,14 @@ public final class TelegraphClient {
         // 说清免得下游以为"到这里坐标一定正常"：Live 也可由第三方直接构造，框架不依赖那个假设。
         if (mc.player != null && !(nearOutlineDistSq(mc.player, z) <= PARTICLE_CULL_DIST_SQ)) return;
         long now = mc.level.getGameTime();
-        // 成本与"多久铺满"都按剩余时间算而不是整发寿命（轮 18 P2-1）：记全额寿命的话，
-        // 一条只剩 2 tick 的旧圈会和刚登记的新圈占同样额度，而"先登记的先满足"就把额度让给了快消失的那发。
-        int remaining = com.klze.colossus.env.TelegraphBudget.remainingTicks(z.endGameTime, now);
-        var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * z.radiusXZ, remaining,
+        // 预算只吃<b>每发常量</b>（周长、粒子寿命），不吃"还剩几 tick"（轮 19 P2-1）：
+        // 记账要限的是场上存活数，那是"率 × 粒子寿命"，与这颗圈还剩多久无关——
+        // 上一版按剩余时间记账，只剩 1 tick 的大圈被记 5 个、实际场上站着 197 个。
+        var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * z.radiusXZ,
                 com.klze.colossus.env.TelegraphBudget.particleLifeTicks(z.visual),
                 com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL - liveParticleEstimate);
         if (plan.empty()) return; // 全局额度已被前面的圈用完：变稀/暂不画，而不是把帧率换掉
-        liveParticleEstimate += plan.liveCost(); // 记账单位=峰值存活数（率 x 发射时长），与两道闸同量纲
+        liveParticleEstimate += plan.liveCost(); // 记账单位=峰值存活数（率 x <b>粒子</b>寿命），与两道闸同量纲
         RandomSource r = mc.level.getRandom();
         ParticleOptions p = z.cachedParticle != null ? z.cachedParticle : (z.cachedParticle = particleFor(z));
         // 槽位随 tick 轮转：每 tick 只补 rate 个角位，靠轮转铺满整圈，而不是每 tick 重画同一批。

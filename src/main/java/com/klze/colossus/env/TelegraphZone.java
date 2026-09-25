@@ -34,10 +34,13 @@ public record TelegraphZone(double cx, double cy, double cz,
 
     /**
      * 半径与预警窗口的硬上界。<b>钳在形状的源头（本 record 的规范构造器）</b>，
-     * 而不是钳在各消费端——因为同一个 radius 会被三条路各自放大成事故（轮 16 P2-3）：
-     * 几何档每帧 {@code 2πr·3} 段 × 2 顶点 = <b>12πr 顶点</b>（r=1e9 时段数饱和成 {@code Integer.MAX_VALUE}
-     * ⇒ 每帧约 42 亿顶点的循环，客户端卡死/OOM）、
-     * 粒子档每 tick 点数、以及服务端 {@code ZoneWork → getEntitiesOfClass(巨大 AABB)} 的扫场。
+     * 而不是钳在各消费端。但"半径会放大成什么事故"只有一条现在还在（轮 19 P3-8 把这里从"三条路"改回一条）：
+     * 服务端 {@code ZoneWork → getEntitiesOfClass(巨大 AABB)} 的扫场——{@code EntitySectionStorage:35-62}
+     * 的 x 方向循环在 1.20.1 <b>没有体积护栏</b>（全 jar 无 {@code Area radius too large} 之类），
+     * {@code r=1e9} 是 1.25 亿次外层循环＝服务端线程挂死。<b>这才是 MAX_RADIUS 存在的真理由。</b>
+     * 另两条已被各自的绝对上限吃掉：几何档 {@code segs = clamp(2πr·3, 24, 768)} 在进循环<b>之前</b>封顶
+     * （所以"每帧 12πr 顶点 / 42 亿顶点卡死"在钳位存在的前提下不再成立，别再拿它当理由），
+     * 粒子档的槽位数与生成率也都与 r 无关（r 只改变每点间隔）。
      *
      * <p>256 格足够任何近战/弹道危险区用；{@code warn} 的 1200 tick（60 秒）是"预警窗口"这个概念的
      * 合理上限——超过它多半是笔误，而 {@code warn = Integer.MAX_VALUE} 会让
@@ -217,12 +220,12 @@ public record TelegraphZone(double cx, double cy, double cz,
      *
      *  <p><b>回执是"每个 Boss 每种问题一次"，不是每次调用一次</b>（轮 18 P2-3）：本方法在招式 lambda 里
      *  跑，挂在 {@code repeating(from,to,1,...)} 上就是每秒两条 warn 的服务端日志洪水。
-     *  去重走 {@link OncePerKey}（有界 LRU），所以"作者写错了要响"和"响到淹没日志"两件事都有上限。 */
+     *  去重走 {@link OncePerKey}（有界、按最近使用逐出，且键里带上被钳的值本身——只按 (Boss,种类) 去重的话，作者把 400 改成 500 仍然越界却不会再响一次，轮 19 P3-11），所以"作者写错了要响"和"响到淹没日志"两件事都有上限。 */
     public static TelegraphZone damageCircle(ColossusBossEntity boss, double forward, double side,
                                              double radiusXZ, int warnTicks, int colorRGB) {
         // 偏移先过闸再进几何式子：`fx * 1e300` 会把 NaN 乘出来，而下游三条路各自吞 NaN 的样子不同
         String who = String.valueOf(boss.getBossId());
-        offsetNotice(forward, side).filter(m -> OncePerKey.firstTime(who + "|offset"))
+        offsetNotice(forward, side).filter(m -> OncePerKey.firstTime(who + "|offset|" + forward + "|" + side))
                 .ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
                         "boss {} {}: {} (further identical notices are suppressed)",
                         boss.getBossId(), "DSL telegraph offset out of range", msg));
@@ -232,7 +235,7 @@ public record TelegraphZone(double cx, double cy, double cz,
         double cx = boss.getX() + fx * off.forward() - fz * off.side();
         double cz = boss.getZ() + fz * off.forward() + fx * off.side();
         double cy = boss.getY() + 0.1;
-        clampNotice(radiusXZ, warnTicks).filter(m -> OncePerKey.firstTime(who + "|shape"))
+        clampNotice(radiusXZ, warnTicks).filter(m -> OncePerKey.firstTime(who + "|shape|" + radiusXZ + "|" + warnTicks))
                 .ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
                         "boss {} {}: {} (further identical notices are suppressed)",
                         boss.getBossId(), "DSL telegraph shape out of range", msg));
@@ -264,23 +267,29 @@ public record TelegraphZone(double cx, double cy, double cz,
      * 一份 view tag 是否<b>齐件</b>（轮 18 P3-3）。
      *
      * <p>为什么必须有：{@code CompoundTag#getDouble/getInt/getString} 对<b>缺失或错类型</b>一律返回
-     * 0/""（不抛，见 {@code CompoundTag.java:291/324/335}），所以一份被截断的 tag 会读成
+     * 0/""（不抛，（{@code CompoundTag.java} 里 291=getInt、324=getDouble、335=getString）），所以一份被截断的 tag 会读成
      * {@code cx=cy=cz=0、rXZ=0→构造器回落 1.0、warn=0→settle=1}——世界原点一个 1 格圈，
      * 而 {@code ZoneWork} 那份载荷里还带着伤害，于是"看不见的圈照样落伤"。
      * 键名表与 {@link #toTag()} 同处一地维护，避免"写了新字段忘了验"。
      */
     public static boolean hasRequiredKeys(CompoundTag tag) {
         if (tag == null) return false;
-        return tag.contains("cx", net.minecraft.nbt.Tag.TAG_DOUBLE)
-                && tag.contains("cy", net.minecraft.nbt.Tag.TAG_DOUBLE)
-                && tag.contains("cz", net.minecraft.nbt.Tag.TAG_DOUBLE)
-                && tag.contains("rXZ", net.minecraft.nbt.Tag.TAG_DOUBLE)
-                && tag.contains("rY", net.minecraft.nbt.Tag.TAG_DOUBLE)
-                && tag.contains("warn", net.minecraft.nbt.Tag.TAG_INT)
-                && tag.contains("color", net.minecraft.nbt.Tag.TAG_INT)
+        // 数值键用 mask=99（ANY_NUMERIC）而不是精确类型：CompoundTag#contains（:258-267）只在
+        // mask==99 时才放行 Byte..Long/Float/Double，而三个 getter 内部走的正是 99 —— 用精确类型会把
+        // 读侧本来读得出来的 putFloat("rXZ",4f)（或 /data modify 给的 IntTag）判成缺件、整条静默丢弃，
+        // 即"闸门比读侧更严"（轮 19 P3-4）。字符串键仍按精确类型。
+        return tag.contains("cx", 99) && tag.contains("cy", 99) && tag.contains("cz", 99)
+                && tag.contains("rXZ", 99) && tag.contains("rY", 99)
+                && tag.contains("warn", 99) && tag.contains("color", 99)
                 && tag.contains("visual", net.minecraft.nbt.Tag.TAG_STRING);
     }
 
+    /**
+     * 读一份几何 tag。<b>调用方必须先过 {@link #hasRequiredKeys}</b>（框架内两处解码都这么做：
+     * {@code TelegraphView.fromTag} 与 {@code ZoneWork.settleRejectReason}）——本方法自己不查，
+     * 因为它是 record 的镜像形状、要保持可组合；缺键会被 {@code CompoundTag} 读成 0/""，
+     * 再经构造器回落成"世界原点一个半径 1 的圈"（轮 19 设计偏差第 4 条把这条契约写明）。
+     */
     public static TelegraphZone fromTag(CompoundTag tag) {
         return new TelegraphZone(tag.getDouble("cx"), tag.getDouble("cy"), tag.getDouble("cz"),
                 tag.getDouble("rXZ"), tag.getDouble("rY"), tag.getInt("warn"), tag.getInt("color"),
