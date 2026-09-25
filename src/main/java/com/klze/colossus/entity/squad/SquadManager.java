@@ -203,7 +203,11 @@ public final class SquadManager {
      * 它没收到广播，但队长已经从世界上消失，下次它 tick 时 {@code resolveLeader} 解析不到人，
      * 就是个不再排期的普通怪（{@link ColossusSquadMemberEntity#followsLeaderAnchor()} 自动失效）。
      *
-     * <p>可重入：读档续上死亡流程会再走一次演出开场，届时成员已死/已销账，广播与撤单都是空转。
+     * <p>可重入——但<b>只限"续演"那条路</b>（轮 9 说清，免得被当成所有死亡入口都会撤单）：
+     * {@code colossus_dying=true} 的档读回来会重推 DeathState、再走一次演出开场，届时成员已死/已销账，
+     * 广播与撤单都是空转。而<b>已结算尸体</b>（存盘血量 0 那档）不再进演出，{@code leaderDown}
+     * 仍是 false、在途排期也不撤——这条路里队长 ≤20t 就消失，残留条目是死数据
+     * （{@code tickSessionAndSquad} 的 {@code !deathPending} 门 + 实体即将移除，永远点不着）。
      */
     public void notifyLeaderDeath(ServerLevel level) {
         leaderDown = true;

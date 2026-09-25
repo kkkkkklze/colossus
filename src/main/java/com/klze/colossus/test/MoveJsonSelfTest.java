@@ -95,6 +95,22 @@ final class MoveJsonSelfTest {
                 "{'kind':'base','base':1}", 17), "weight"));
         check.accept("requires entry count is capped", rejects(entriesOf("requires",
                 "{'phase_in':[0,9]}", 17), "requires"));
+        // 边界的另一半（轮 9）：封顶判据是 `> MAX`，只登记"17 拒"的话把 `>` 写成 `>=` 也全绿。
+        // 所以 16 条必须**能过**，上限这条规则才算被两头钉住。
+        check.accept("16 weight entries still decode (cap boundary is inclusive)",
+                decodesAtCap("weight", "{'kind':'base','base':1}", 16));
+        check.accept("16 requires entries still decode (cap boundary is inclusive)",
+                decodesAtCap("requires", "{'phase_in':[0,9]}", 16));
+    }
+
+    /** 16 条应当能解出来：返回 true 表示解码成功且条目数没被偷偷裁掉。 */
+    private static boolean decodesAtCap(String field, String element, int count) {
+        try {
+            MoveDef d = MoveCodec.decodeMove("cap", NS, obj(entriesOf(field, element, count)));
+            return d != null;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** 造一条带 N 个同名条目的记录（封顶类判据共用：16 合法、17 拒）。 */

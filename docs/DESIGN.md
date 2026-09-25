@@ -84,7 +84,8 @@ protected void registerMoves(MoveSetBuilder m) {
 - **接敌**：`startSeenByPlayer` → bar 可见；`EngagementTracker` hurt 收集，10 分钟 TTL 剔除死亡/超距。
 - **阶段**：`checkPhaseGates()` 在 aiStep 头部跑一次性阈值（0.66/0.33 默认表可覆写）→ push `PhaseChangeState`（期间 `hurt` 返回 false 全免伤，动画帧点真正 `setPhase(n)`，同时 `resetAttacks()` 清冷却——Ignis 语义）。
 - **死亡**：`hurt` 检测 hp≤0 → 钉住血量进入 `DeathState`（hp 钉在 1.0 免伤、血条清零并隐藏、停音乐、清空延迟队列、squad 收摊广播——提前到演出开场，让"成员散场"与胜负对齐；顺带撤掉队长名下的在途复活预约，买的是账的语义而不是时序：**补员路径在 `deathPending` 下被 `aiStep` 与 `tickSessionAndSquad` 双重门挡死**，轮 8 更正过这里的因果），动画时长到 → `resolveDeath()`：killBoard 记录 → 全体参战者补 `PLAYER_KILLED_ENTITY` 触发 → 挑战次数 +1 → 掉落（`LootDelivery.VANILLA` 即时 / `INTO_CHEST` 缓冲入箱，第五批已落）。
-- **不许给 0 血实体抬血**（轮 8 立的规则，两个抬血点都在框架内部）：读档的 hp_ratio 回填与 `applyScaling` 的百分比回填都要求"还活着"。原版收尸靠 `isDeadOrDying()`（`LivingEntity.tickDeath`，`deathTime>=20` 才 `remove(KILLED)`），血量一旦被抬成 1.0f，那具尸体就既不会消失、又能被再杀一遍——击杀数与战利品二次发放。
+- **不许给已结算的尸体抬血**（轮 8 发现、轮 9 收成一个点）：框架里的血量写点有 `resolveDeath` 的 `setHealth(0)`、`die()` 的 1.0 钉血、读档的 hp_ratio 回填、`applyScaling` 的百分比回填、`ArenaSession.fail()` 的团灭回血（默认开）。前三处各自有语义，**通用不变量只写在 `ColossusBossEntity.setHealth` 的覆写里**：`deathResolved && getHealth()<=0` 时一律拒绝抬血。为什么值得钉：血量一旦被抬起来，`isDeadOrDying()` 永假 → 原版 `tickDeath` 的 20t 收尸路径断掉 → 变成不可杀、永不消失的雕像，谁碰一下还多结算一次（击杀数 + 战利品）。vanilla 的 `heal()` 自带 `f>0` 门（`LivingEntity:1039-1042`），`setHealth` 没有，所以补在 Boss 这一侧；`fail()` 是 public 且下游可自接失败回路，靠调用方各写一遍迟早漏一处。
+- **招式表登记的故障隔离**（轮 9）：Java DSL 的 `registerMoves` 运行期第一次跑在 `moveSet()` 里，而它的调用点在 `aiStep` 的选招分支——1.20.1 `Level#guardEntityTick` 抓到 Throwable 之后是 `throw new ReportedException`（`removeErroringEntities` 默认 false），所以坏数据会炸成"玩家进战即崩服"。现在 `moveSet()` 整段包 `catch`：报一次 error、沿用上一张好表（首建失败则空表），配合 `MoveBuilder.anim()` 的 setter 校验 + `MoveDef` 构造器的值域闸门，让作者拿到**带招式名**的报错而不是崩溃循环。
 - **缩放**：`finalizeSpawn` + 每 10t 复查附近存活玩家数，`ScalingStrategy` 默认 `1+(sqrt(n)-1)*0.5`，用 `addTransientModifier` + 血量百分比回填。
 
 ### 2.4 同步契约（entityData，全 int/bool/string）
@@ -384,3 +385,26 @@ protected void registerMoves(MoveSetBuilder m) {
 > 下一批：v10 重派（提示词里交出语料真实布局，要求贴 `ls`/`find` 存在性证据；验收只认磁盘上回读到的文件）、
 > `requires`/`weight` 词汇表扩展（先拿到真实依据，再决定把上限从 16 收到多少）、预警轮廓入 NBT、
 > `not_recent`/连招链的状态存法、GL addon 运行期复验、许可证裁定。
+
+> 进度（2026-09-25 第十九批·审查轮 9 处置）：✅ **抬血规则收成一个覆写点**——`ColossusBossEntity.setHealth`
+> 在 `deathResolved && hp<=0` 时拒绝任何抬血，同时**删掉**轮 8 加在 `applyScaling` 的那道重复判据
+> （同一语义两处各写一遍，迟早有一处忘改）。轮 9 之所以能抓出漏网点，是因为框架里还有第三个写血的地方：
+> `ArenaSession.fail()` 的团灭回血（`healOnFail` 默认 true，且 `fail()` 是 public，下游自接的失败回路
+> 能把它调到尸体上）——后果比轮 8 那条更糟：尸体被抬成**满血**且不可杀。vanilla 侧核对完才敢收口：
+> `heal()` 自带 `f>0` 门、`setHealth` 只有 `Mth.clamp(v,0,max)`，1.20.1 也**没有**"MAX_HEALTH 修饰符变化
+> 回灌当前血量"那套（无 `detectAndApplyAttributes`），所以属性重挂不构成第四处。
+> ✅ **补掉本批自己引入的崩溃面**：Java DSL 的 `registerMoves` 运行期第一次跑在 `moveSet()` 里，
+> 而它的调用点在 `aiStep` 的选招分支；轮 8 把空动画名从"静默接受"改成构造器抛 IAE 之后，
+> 下游写 `.anim("")` 就变成**进战那一 tick 崩服**（1.20.1 `Level#guardEntityTick` 抓到 Throwable 是
+> `throw new ReportedException`，`removeErroringEntities` 默认 false），且 `javaMoves` 只在成功后赋值
+> ⇒ 崩溃循环。现在 `moveSet()` 整段 catch + 只报一次 error + 沿用上一张好表，`MoveBuilder.anim()`
+> 的 setter 校验让报错指向作者那一行；JSON 侧本来就有字段级回执，**不对称的正是 DSL**。
+> ✅ 三处桩修正：新桩补"过档后碰一刀必须被拒"的正面判别式（原 KillBoard 不变量那条无判别力，
+> 已降级并在注释里写明）；封顶判据补上"16 条能过"的另一半（只钉 17 拒的话 `>` 写成 `>=` 也全绿）；
+> 更正我写错的机制两处——`DeathTime` **是入档的**（`LivingEntity:672` 写、`:720` 读，
+> 重载尸体从存档 `deathTime` 接着走剩下 ~11t，不是"重新数 20t"），以及 `notifyLeaderDeath`
+> 的"可重入"只限 `colossus_dying=true` 的续演路径（已结算尸体那档不进演出，残留排期是死数据）。
+> 遗留新增：`DATA_DEATH_TICK` 是 entityData 不落盘 ⇒ 重载后的尸体在 ≤20t 里 `deathTick()==0`，
+> 客户端**没有死亡动画**（站着消失）。修前是 1 血雕像，所以不算回归，但这条要真做就得让 ZoneSync
+> 那类"重载补状态"的通道把死亡帧也带上，与预警轮廓入 NBT 记同一笔账（§3）。
+> 验证：build（`-Pgecko`）+ 自检 **69/69** + audit **12** + GameTest **All 12 passed**（连跑三轮稳定）。

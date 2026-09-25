@@ -277,7 +277,8 @@ public final class StateSelfTest {
         check("whitespace-only anim name is rejected too", whitespaceRejected);
     }
 
-    private static void testFrameSingleShot() {        List<Integer> hit = new ArrayList<>();
+    private static void testFrameSingleShot() {
+        List<Integer> hit = new ArrayList<>();
         FrameRunner<Object> fr = FrameRunner.builder()
                 .at(3, (c, t) -> hit.add(t))
                 .build();

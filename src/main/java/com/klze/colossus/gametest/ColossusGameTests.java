@@ -108,8 +108,9 @@ public class ColossusGameTests {
      * <p>时间线（1.20.1 一手源码）：{@code deathAnimationTicks()=100} ⇒ t≈101 结算并
      * {@code setHealth(0)}（{@code ColossusBossEntity.resolveDeath}）；原版 {@code tickDeath}
      * 要到 {@code deathTime >= 20} 才 {@code remove(KILLED)}（{@code LivingEntity:546-551}），
-     * 而 {@code DeathTime} <b>不入档</b>（{@code LivingEntity:669} 附近只写 Health）⇒
-     * t≈110 过档正落在窗口正中：原 Boss 尚未移除（血量 0），重载那具拿到 {@code dying=false + hp=0}。
+     * 而 {@code DeathTime} <b>是入档的</b>（{@code LivingEntity:672} 写 {@code putShort("DeathTime")}、
+     * {@code :720} 读回——轮 8 我在 docstring 里写过"不入档"，轮 9 更正）⇒ 重载那具从存档里的
+     * {@code deathTime}（约 9）接着走剩下 ~11t，桩在 +60t 取判足够宽。
      */
     @GameTest(template = YARD, timeoutTicks = 400, batch = "death-resolve-save")
     public void resolvedCorpseDoesNotResurrectAsOneHpStatue(GameTestHelper helper) {
@@ -128,23 +129,34 @@ public class ColossusGameTests {
 
             var tag = new net.minecraft.nbt.CompoundTag();
             boss.saveWithoutId(tag);
-            // 模拟"这一档随卸载离场"：原尸必须先退场，否则 `load(tag)` 会把 loaded 的 UUID
-            // 改成它的，场上出现两个同 UUID 的实体——ServerLevel 的 entityByUuid 会被后写的那个
-            // 覆盖，收尸时 unregister 又不校验身份（归因就脏了。审查轮 8 顺带记的这笔账）
+            // 模拟"这一档随卸载离场"：原尸必须先退场。`load(tag)` 会把新实体的 UUID 改成旧那具的，
+            // 场上同 UUID 两具实体时按 UUID 反查就成歧义态（`ServerLevel.getEntity(UUID)` 走
+            // `getEntities().get(uuid)` 一张表，一个键只能对一个值；`addWithUUID` 撞上重复 UUID
+            // 时也只是打一条 warn）——本桩判据都持引用，不让归因脏在这里。
             boss.discard();
             ColossusBossEntity loaded = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
                     new BlockPos(4, 3, 4));
             loaded.load(tag);
-            // 这两条就是原 bug 的正面判据：hp_ratio 的 clamp 下限 1.0f 会把尸体抬成 1 血，
+            // 这两条是原 bug 的正面判据：hp_ratio 的 clamp 下限 1.0f 会把尸体抬成 1 血，
             // 而 colossus_dying=false 让挂起位补不回来 → 它会照常选招
             helper.assertTrue(loaded.getHealth() <= 0.0f,
                     "读档不许给已结算的尸体抬血，实际 " + loaded.getHealth() + "（＝1 血雕像重现）");
             helper.assertTrue(loaded.isDeathPending(),
                     "读档应认出「这具已结算」并把死亡挂起补回来（否则它会照常选招攻击）");
 
+            // 判别式补强（轮 9）：原症状是"谁碰它一下就走完整遍死亡流程"，光看血量并不能证这条路被堵死。
+            // 修前：hp 被抬成 1.0 且 deathPending=false → hurt 受理 → die() → 二次演出 → 二次结算；
+            // 修后：死亡挂起在，hurt 必须直接拒（顺带证明抬血覆写没被绕开）。
+            boolean accepted = loaded.hurt(loaded.damageSources().playerAttack(mock), 1.0f);
+            helper.assertFalse(accepted, "碰尸体这一刀必须被拒（受理＝二次结算那条路又通了）");
+            helper.assertTrue(loaded.getHealth() <= 0.0f,
+                    "被拒的一刀也不许把血量抬起来，实际 " + loaded.getHealth());
+
             helper.runAfterDelay(60, () -> {
                 helper.assertTrue(loaded.isRemoved(),
                         "原版收尸路径必须自己走完（还站着＝血被钉住了，P0 死循环换个入口复发）");
+                // 这条是<b>不变量兜底</b>：真正挡住二次结算的是上面那刀被拒；单看它，
+                // 修前的尸体不挨刀也不会自己涨计数（轮 9 点的"无判别力"就出在这种断言上）
                 helper.assertTrue(BossKillBoard.get(helper.getLevel())
                                 .killCount(ExampleColossus.BOSS_ID) == killsAtSave,
                         "尸体退场不得二次结算（击杀计数从过档起又涨了＝战利品也会二次发放）");

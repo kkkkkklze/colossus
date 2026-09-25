@@ -432,12 +432,10 @@ public abstract class ColossusBossEntity extends Monster {
         double dmgMul = s.damageMultiplier(players) * ColossusConfig.GLOBAL_DAMAGE_MULTIPLIER.get();
         setOrRemove(this.getAttribute(Attributes.MAX_HEALTH), SCALE_HP_ID, hpMul - 1.0);
         setOrRemove(this.getAttribute(Attributes.ATTACK_DAMAGE), SCALE_DMG_ID, dmgMul - 1.0);
-        if (this.getMaxHealth() > 0 && this.getHealth() > 0.0f) {
-            // 回填只在"还活着"时做：0 血是已结算尸体的形态，抬成 1.0f 就等于
-            // isDeadOrDying() 永假 → 原版 tickDeath 的 20t 收尸路径整条断掉（审查轮 8 P1，
-            // 新桩第一次跑就红在这——读档那道门修好了，这里第二个抬血点又把人救回来了）。
-            // 演出期血量钉在 1.0，走的是同一个分支，行为不变。
-            this.setHealth(Math.max(1.0f, ratio * this.getMaxHealth())); // 百分比回填
+        if (this.getMaxHealth() > 0) {
+            // 百分比回填。"不许抬已结算尸体的血"这条规则**只写在 setHealth 覆写里**（轮 9 收口），
+            // 这里不再重复判存活——两处各写一遍迟早有一处忘改。
+            this.setHealth(Math.max(1.0f, ratio * this.getMaxHealth()));
         }
     }
 
@@ -476,17 +474,41 @@ public abstract class ColossusBossEntity extends Monster {
     @Nullable private java.util.List<MoveDef> javaMoves;
     private long moveDataRevision = -1L;
 
+    /** 招式表登记失败时留一次错误日志用（同一种子只报一次，别每 tick 刷屏）。 */
+    @Nullable private String moveBuildFailureLogged;
+
     public final MoveSet moveSet() {
         long rev = com.klze.colossus.move.MoveDataRegistry.revision();
         if (this.moveSet == null || this.moveDataRevision != rev) {
-            if (this.javaMoves == null) {
-                MoveSetBuilder builder = new MoveSetBuilder(this, this.getBossId());
-                this.registerMoves(builder);
-                this.javaMoves = builder.builtDefs();
+            // 轮 9 的故障隔离：本方法的运行期调用点是 trySelectAttack/forceMove（都在 aiStep 里），
+            // 而 Java DSL 的 registerMoves 就在这儿第一次跑——下游写坏一条招式
+            // （如 .anim("")）就会把 IAE 抛进战斗那一 tick。1.20.1 的 Level#guardEntityTick
+            // 抓住 Throwable 之后是 **throw new ReportedException**（不是丢实体继续跑，
+            // removeErroringEntities 默认 false），所以不做这里就会变成"玩家进战即崩服"。
+            // 姿态与 drainWork / ColossusAnims.fire* 一致：吃掉、报一次、退化到上一张好表。
+            try {
+                if (this.javaMoves == null) {
+                    MoveSetBuilder builder = new MoveSetBuilder(this, this.getBossId());
+                    this.registerMoves(builder);
+                    this.javaMoves = builder.builtDefs();
+                }
+                this.moveSet = MoveSet.merge(this, this.javaMoves,
+                        com.klze.colossus.move.MoveDataRegistry.defsFor(this.getBossId()));
+                this.moveDataRevision = rev;
+                this.moveBuildFailureLogged = null; // 成功过就允许下次失败再报一次
+            } catch (RuntimeException | StackOverflowError broken) {
+                String key = this.getBossId() + "/" + broken.getClass().getSimpleName();
+                if (!key.equals(this.moveBuildFailureLogged)) {
+                    this.moveBuildFailureLogged = key;
+                    Colossus.LOGGER.error("boss {} 的招式表登记失败（{}）——沿用上一张表，"
+                                    + "这条日志只报一次，去 registerMoves 里修数据",
+                            this.getBossId(), broken.toString(), broken);
+                }
+                if (this.moveSet == null) {
+                    this.moveSet = com.klze.colossus.move.MoveSet.merge(this, List.of(), List.of());
+                }
+                this.moveDataRevision = rev; // 别再每 tick 重试构建
             }
-            this.moveSet = MoveSet.merge(this, this.javaMoves,
-                    com.klze.colossus.move.MoveDataRegistry.defsFor(this.getBossId()));
-            this.moveDataRevision = rev;
         }
         return this.moveSet;
     }
@@ -772,6 +794,27 @@ public abstract class ColossusBossEntity extends Monster {
     @SuppressWarnings("unchecked")
     public net.minecraftforge.entity.PartEntity<?>[] getParts() {
         return this.parts.toArray(new net.minecraftforge.entity.PartEntity[0]);
+    }
+
+    /**
+     * 已结算尸体的抬血闸门（轮 9 收口，框架内**唯一**一处通用防线）。
+     *
+     * <p>为什么必须有：{@code deathResolved=true 且 hp<=0} 之后，谁再动血量都不该把它抬起来——
+     * 抬一次就是一次"1 血不死雕像 + 二次结算"。框架里除了已钉住的两个回填点，还有
+     * {@code ArenaSession.fail()} 的团灭回血这类调用方（默认 healOnFail=true），
+     * 而 {@code fail()} 是 public，下游自接的失败回路随时可能调到尸体上。
+     * vanilla 的 {@code heal()} 自带 {@code f > 0} 门（{@code LivingEntity:1039-1042}），
+     * 但 {@code setHealth} 没有，所以在 Boss 这一侧补上。
+     *
+     * <p>只在"结算之后"生效，绝不影响死亡演出：{@code die()} 里把 hp 钉成 1.0 那一刻
+     * {@code deathResolved} 仍是 false，读档时原版先写 Health 也发生在置位之前。
+     */
+    @Override
+    public void setHealth(float health) {
+        if (this.deathResolved && this.getHealth() <= 0.0f && health > 0.0f) {
+            return; // 已结算＝这具档只等收尸，任何抬血一律拒绝
+        }
+        super.setHealth(health);
     }
 
     /** 死亡演出期间的控制效果免疫（防"死亡动画里被冻住"的怪状态）。 */

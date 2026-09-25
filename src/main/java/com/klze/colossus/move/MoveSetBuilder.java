@@ -92,7 +92,16 @@ public final class MoveSetBuilder {
         /** 目标距离门（≤range 格才可选）。 */
         public MoveBuilder range(float blocks) { this.range = blocks; return this; }
         /** 客户端动画名，默认取招式 path。 */
-        public MoveBuilder anim(String name) { this.animName = name; return this; }
+        /** 动画名不许空：值域判据的正主是 {@link MoveDef} 构造器（DSL/JSON 同一个闸门），
+         *  这里只是把报错点提前到<b>作者自己那一行</b>，消息里带招式名，省得去栈里找。 */
+        public MoveBuilder anim(String name) {
+            if (name == null || name.isBlank()) {
+                throw new IllegalArgumentException("move " + id + ": anim name must be non-blank"
+                        + "（客户端拿它当取动画的键，空串＝静默不播）");
+            }
+            this.animName = name;
+            return this;
+        }
         /** 上下文权重函数（距离/阶段自适应选招）。 */
         public MoveBuilder weight(ToIntFunction<AttackContext> fn) { this.weightFn = fn; return this; }
         /** 固定权重。 */
