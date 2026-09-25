@@ -21,6 +21,12 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # Windows 上提交的文件位不可信（core.fileMode=false 时 git 不看可执行位），
+      # Linux runner 会直接 "./gradlew: Permission denied"——索引里已用
+      # `git update-index --chmod=+x gradlew` 修好，这里再兜一道，防回归。
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
       - name: Build with Gradle
         run: ./gradlew build
 
