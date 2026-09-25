@@ -35,19 +35,63 @@ public record TelegraphZone(double cx, double cy, double cz,
     /**
      * 半径与预警窗口的硬上界。<b>钳在形状的源头（本 record 的规范构造器）</b>，
      * 而不是钳在各消费端——因为同一个 radius 会被三条路各自放大成事故（轮 16 P2-3）：
-     * 几何档每帧顶点数 {@code ≈ 6πr}（r=1e9 → {@code Integer.MAX_VALUE} 个顶点的循环，客户端卡死/OOM）、
+     * 几何档每帧 {@code 2πr·3} 段 × 2 顶点 = <b>12πr 顶点</b>（r=1e9 时段数饱和成 {@code Integer.MAX_VALUE}
+     * ⇒ 每帧约 42 亿顶点的循环，客户端卡死/OOM）、
      * 粒子档每 tick 点数、以及服务端 {@code ZoneWork → getEntitiesOfClass(巨大 AABB)} 的扫场。
      *
      * <p>256 格足够任何近战/弹道危险区用；{@code warn} 的 1200 tick（60 秒）是"预警窗口"这个概念的
      * 合理上限——超过它多半是笔误，而 {@code warn = Integer.MAX_VALUE} 会让
      * {@code settleDelayTicks}/{@code lifetimeTicks} <b>双双溢出</b>（实测 -2147483639）。
      *
-     * <p>两条路径的口径不同且是有意为之：<b>作者写的</b>（JSON/DSL）越界要响，
-     * 所以 {@code MoveCodec} 另有字段级拒；<b>坏存档读回来的</b>只钳不打，
-     * 因为炸在 {@code readAdditionalSaveData} 里＝区块一加载就崩（轮 9 那个教训）。
+     * <p>三条入口的口径<b>不</b>相同，说清免得下游误判（轮 17 P2-1 收回先前那句"JSON/DSL 都响"）：
+     * <ul>
+     *   <li><b>JSON</b>：{@code MoveCodec} 的 {@code circle_ahead} 有<b>字段级拒</b>，越界进不了表；</li>
+     *   <li><b>DSL</b>（{@link #damageCircle}）：没有登记期检查，越界只会被<b>这里</b>钳掉
+     *       （轮 17 实测：半径 400 静默变 256、warn 5000 静默变 1200，零日志）；</li>
+     *   <li><b>坏存档 / 恶意服务端</b>：只钳<b>不打</b>——炸在 {@code readAdditionalSaveData}
+     *       或渲染路径里＝区块一加载就崩（轮 9 那个教训）。</li>
+     * </ul>
+     * DSL 那一档为什么不升成异常：形状是在 {@code registerMoves} 里现算的，抛出来会整张表回落到
+     * 上一版（轮 9 的崩溃面），代价大于收益；但它静默改值不可接受 ⇒ 见 {@link #clampNotice}。
      */
     public static final double MAX_RADIUS = 256.0;
     public static final int MAX_WARN_TICKS = 1200;
+
+    /**
+     * 圈心绝对坐标的上界（轮 17 P3-5 后半：半径与 warn 钳了，圆心没钳）。数值直接取
+     * vanilla 声明的那个 {@code WorldBorder.MAX_CENTER_COORDINATE}（{@code WorldBorder.java:19}，
+     * {@code 2.9999984E7D}）——<b>不</b>是自己挑的一个数，也不引用它名字相近的兄弟：
+     * 本版本 {@code MAX_CENTER_COORDINATE} 声明后<b>没有任何地方使用</b>（全树 1 处命中就是声明本身，
+     * 与 {@code ParticleEngine.MAX_PARTICLES_PER_LAYER} 同一类死常量），真正生效的是
+     * {@code WorldBorder.java:27} 的 {@code absoluteMaxSize = 29999984}，两者差 16 格。
+     *
+     * <p>所以这一道<b>不</b>是"圈心离 Boss 不能超过这么多"的业务规则——框架不做那种判断。
+     * 它只挡两类值：非有限数（NaN/±Inf 会让 {@link #box()} 退化成空盒或无限盒，
+     * {@code AABB#intersects} 对 NaN 一律 false ⇒ 结算静默不命中，客户端还会拿到 NaN 坐标的粒子）
+     * 和<b>坏档 / 恶意载荷</b>里的天文数字（{@code double} 到 1e18 连 1 格精度都不剩，
+     * 画出来的圈在客户端会抖）。
+     */
+    public static final double MAX_CENTER_ABS =
+            net.minecraft.world.level.border.WorldBorder.MAX_CENTER_COORDINATE;
+
+    /**
+     * {@code circle_ahead} 的圈心<b>相对 Boss</b> 偏移上限（格）。
+     *
+     * <p>这个数字是<b>选型规则，不是推导</b>：地面危险区的语义是"这块地将要出事"，
+     * 远到一定程度的那一发该做成弹道/实体而不是贴地块，否则玩家既看不见来源也来不及读圈。
+     * 2048 给得比 {@link #MAX_RADIUS} 宽八倍，够任何"远处落点"型演出用；再远就是配错了，
+     * 而配错的后果是静默不命中（圈画在没人所在的地方，服务端扫场扫不到人、零回执），
+     * 所以 JSON 侧给字段级拒、DSL 侧走 {@link #clampNotice} 同一族的源头钳位。
+     */
+    public static final double MAX_AHEAD_OFFSET = 2048.0;
+
+    /** 粒子档的默认样式名（轮 17 P3-11：以前 "dust" 字面量散在构造器/DSL/注释三处）。 */
+    public static final String DEFAULT_VISUAL = "dust";
+
+    /** 样式名的唯一口径：null、空串、全空白都算"没写"，一律回落 {@link #DEFAULT_VISUAL}。 */
+    public static String visualOrDefault(String visual) {
+        return visual == null || visual.isBlank() ? DEFAULT_VISUAL : visual;
+    }
 
     public TelegraphZone {
         radiusXZ = finiteOr(radiusXZ, 1.0);
@@ -58,11 +102,58 @@ public record TelegraphZone(double cx, double cy, double cz,
         radiusY = Math.min(radiusY, MAX_RADIUS);
         if (warnTicks < 0) warnTicks = 0;
         warnTicks = Math.min(warnTicks, MAX_WARN_TICKS);
-        if (visual == null || visual.isBlank()) visual = "dust";
+        cx = clampCoord(cx);
+        cy = clampCoord(cy);
+        cz = clampCoord(cz);
+        visual = visualOrDefault(visual);
     }
 
     private static double finiteOr(double v, double fallback) {
         return Double.isFinite(v) ? v : fallback;
+    }
+
+    /** 圆心那一道的实现（非有限 → 0；越界 → 钳到 ±{@link #MAX_CENTER_ABS}）。 */
+    private static double clampCoord(double v) {
+        if (!Double.isFinite(v)) return 0.0;
+        if (v > MAX_CENTER_ABS) return MAX_CENTER_ABS;
+        if (v < -MAX_CENTER_ABS) return -MAX_CENTER_ABS;
+        return v;
+    }
+
+    /** 越界被钳时的一句人话（DSL 侧唯一的反馈通道；JSON 侧走字段级拒，见 {@code MoveCodec}）。 */
+    public static java.util.Optional<String> clampNotice(double wantRadius, double wantWarn) {
+        if (wantRadius > MAX_RADIUS || wantRadius <= 0.0 || !Double.isFinite(wantRadius)
+                || wantWarn > MAX_WARN_TICKS || wantWarn < 0) {
+            return java.util.Optional.of("telegraph shape was clamped: radius " + wantRadius
+                    + " -> (0," + MAX_RADIUS + "], warn " + wantWarn + " -> [0," + MAX_WARN_TICKS + "]");
+        }
+        return java.util.Optional.empty();
+    }
+
+    /**
+     * 圈心偏移的同一档回执（轮 17 P3-5：{@code radius}/{@code warn} 有界而 {@code forward}/{@code side}
+     * 任意大——一个 {@code forward=1e300} 的圈会落在世界边界外，扫场扫不到人、<b>零回执</b>，
+     * 比"半径太大"更静默）。返回非空时调用方（{@link #damageCircle}）照它钳。
+     */
+    public static java.util.Optional<String> offsetNotice(double wantForward, double wantSide) {
+        if (outOfOffset(wantForward) || outOfOffset(wantSide)) {
+            return java.util.Optional.of("telegraph center offset was clamped: forward " + wantForward
+                    + ", side " + wantSide + " -> |v| <= " + MAX_AHEAD_OFFSET
+                    + " (a drop that far out should be a projectile, not a ground zone)");
+        }
+        return java.util.Optional.empty();
+    }
+
+    private static boolean outOfOffset(double v) {
+        return !Double.isFinite(v) || Math.abs(v) > MAX_AHEAD_OFFSET;
+    }
+
+    /** 偏移钳位（非有限 → 0，即"圈画在自己脚下"；越界 → 取边界值）。 */
+    public static double clampOffset(double v) {
+        if (!Double.isFinite(v)) return 0.0;
+        if (v > MAX_AHEAD_OFFSET) return MAX_AHEAD_OFFSET;
+        if (v < -MAX_AHEAD_OFFSET) return -MAX_AHEAD_OFFSET;
+        return v;
     }
 
     /** 轮廓该活多久：<b>整段</b> warn 窗口 + 淡出，客户端与服务端投影响时都用这一个口径。 */
@@ -94,17 +185,24 @@ public record TelegraphZone(double cx, double cy, double cz,
                 e -> e != owner && e.isAlive() && !e.isSpectator());
     }
 
-    /** 伤害型结算（默认 visual="dust"；damage/knockback 由 ZoneEffect 携带）。
+    /** 伤害型结算（默认 visual={@link #DEFAULT_VISUAL}；damage/knockback 由 ZoneEffect 携带）。
      *  前向取 <b>yBodyRot 水平投影</b>而非 getLookAngle——抬头看天时视线水平分量趋零，
      *  圈心会塌回脚下（审查 P2#11）。 */
     public static TelegraphZone damageCircle(ColossusBossEntity boss, double forward, double side,
                                              double radiusXZ, int warnTicks, int colorRGB) {
+        // 偏移先过闸再进几何式子：`fx * 1e300` 会把 NaN 乘出来，而下游三条路各自吞 NaN 的样子不同
+        offsetNotice(forward, side).ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
+                "boss {} {}: {}", boss.getBossId(), "DSL telegraph offset out of range", msg));
+        forward = clampOffset(forward);
+        side = clampOffset(side);
         double fx = -Math.sin(Math.toRadians(boss.yBodyRot));
         double fz = Math.cos(Math.toRadians(boss.yBodyRot));
         double cx = boss.getX() + fx * forward - fz * side;
         double cz = boss.getZ() + fz * forward + fx * side;
         double cy = boss.getY() + 0.1;
-        return new TelegraphZone(cx, cy, cz, radiusXZ, 1.0, warnTicks, colorRGB, "dust");
+        clampNotice(radiusXZ, warnTicks).ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
+                "boss {} {}: {}", boss.getBossId(), "DSL telegraph shape out of range", msg));
+        return new TelegraphZone(cx, cy, cz, radiusXZ, 1.0, warnTicks, colorRGB, DEFAULT_VISUAL);
     }
 
     /**

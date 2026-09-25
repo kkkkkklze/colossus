@@ -257,6 +257,10 @@ public abstract class ColossusBossEntity extends Monster {
     /**
      * 在途轮廓上限（子类可按 Boss 抬；先读上面那条算式再抬）。实际生效值还要过
      * {@link #telegraphCap()} 这道钳，所以覆写它<b>不能</b>把同步载荷推到出界的大小。
+     *
+     * <p>要"这个 Boss 不做预警"请在招式表里<b>别用 telegraph 帧</b>，不要把这里返回 0：
+     * 0 会被 {@link #telegraphCap()} 抬成 1。理由是"关掉投影但仍落伤害"＝制造没预警的攻击，
+     * 那比少一格容量严重得多（轮 17 设计偏差第 2 条的裁决）。
      */
     protected int maxActiveTelegraphs() { return MAX_ACTIVE_TELEGRAPHS; }
 
@@ -276,14 +280,22 @@ public abstract class ColossusBossEntity extends Monster {
         // 下界钳到 <b>1</b>，不是 0（轮 16 P2-4）：0 会让 `size() >= cap` 恒真 ⇒ 这个 Boss 所有带预警的
         // 招式一招都不落，而日志从"cap -1（一眼是配错）"变成"cap 0（像是框架的有意决定）"——
         // 把一次常见笔误（写 -1 表示"不限"）换成静默消失，正是本仓最反对的那种失败模式。
-        int clamped = net.minecraft.util.Mth.clamp(requested, 1, HARD_MAX_TELEGRAPHS);
+        int clamped = clampTelegraphCap(requested);
         if (requested != clamped && !this.telegraphCapWarned) {
             this.telegraphCapWarned = true; // 一次性：越界要响，但不能每发 telegraph 响一遍
             Colossus.LOGGER.warn("boss {} maxActiveTelegraphs() returned {} — clamped to {} (valid range 1..{})."
-                    + " A cap of 0 or less disables every telegraphed attack silently.",
+                    + " Negative values are lifted to 1 on purpose: 0 would silently drop every"
+                            + " telegraphed attack, so it is not honoured as an off-switch.",
                     this.getBossId(), requested, clamped, HARD_MAX_TELEGRAPHS);
         }
         return clamped;
+    }
+
+    /** 钳位单独成<b>纯函数</b>（轮 17 P3-2）：否则"下界从 0 抬到 1"与"上界 32"这两条谁都自检不了。 */
+    public static int clampTelegraphCap(int requested) {
+        // 下界是 1 而不是 0：0 会让 `size() >= cap` 恒真 ⇒ 该 Boss 所有带预警的招一招不落，
+        // 而日志从"cap 0（像是框架有意决定）"看起来无害，实际是静默消失（轮 16 P2-4）。
+        return net.minecraft.util.Mth.clamp(requested, 1, HARD_MAX_TELEGRAPHS);
     }
 
     private boolean telegraphCapWarned = false;
@@ -352,7 +364,11 @@ public abstract class ColossusBossEntity extends Monster {
         }
         long now = this.level().getGameTime();
         int id = ++this.telegraphSeq;
-        this.telegraphViews.put(id, new TelegraphView(id, zone, now, now + Math.max(1, ticks)));
+        // ticks 是"轮廓活多久"的第二个入口（public），不能让它绕过本批刚钉的不变量
+        // "轮廓必须活得比那一发的结算久"（TelegraphZone#lifetimeTicks）：只抬高不压低，
+        // 调用方给更长就照它的（淡出留白是表现选择），给短了就兜回形状口径（轮 17 P3-9）。
+        int lifetime = Math.max(Math.max(1, ticks), zone.lifetimeTicks());
+        this.telegraphViews.put(id, new TelegraphView(id, zone, now, now + lifetime));
         this.publishTelegraphs();
         return id;
     }

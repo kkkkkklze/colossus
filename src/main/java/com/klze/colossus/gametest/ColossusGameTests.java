@@ -730,6 +730,22 @@ public class ColossusGameTests {
                 new BlockPos(4, 3, 4));
         var zone = new com.klze.colossus.env.TelegraphZone(4.5, 3.0, 4.5, 6.0, 1.5, 30, 0xFF4040, "dust");
 
+        // 轮 17 P3-2：投影上限钳位的四条断言。它<b>不能</b>放 colossusSelfTest——那个 JVM 里
+        // ColossusBossEntity 的 <clinit> 起不动（要 vanilla 注册表，而 Forge 注入的
+        // Bootstrap:62 NetworkHooks.init 在独立进程里必炸），所以钉在本门。
+        helper.assertTrue(ColossusBossEntity.clampTelegraphCap(-1) == 1
+                        && ColossusBossEntity.clampTelegraphCap(0) == 1,
+                "下界必须抬到 1：0 会让 size()>=cap 恒真 ⇒ 这个 Boss 所有带预警的招一招不落，实测 clamp(-1)="
+                        + ColossusBossEntity.clampTelegraphCap(-1) + " clamp(0)="
+                        + ColossusBossEntity.clampTelegraphCap(0));
+        helper.assertTrue(ColossusBossEntity.clampTelegraphCap(8) == 8
+                        && ColossusBossEntity.clampTelegraphCap(40) == ColossusBossEntity.HARD_MAX_TELEGRAPHS
+                        && ColossusBossEntity.clampTelegraphCap(Integer.MAX_VALUE)
+                                == ColossusBossEntity.HARD_MAX_TELEGRAPHS,
+                "区间内原样保留、越界钳到硬上界（上界一松就是无界同步载荷），实测 clamp(40)="
+                        + ColossusBossEntity.clampTelegraphCap(40) + " clamp(MAX)="
+                        + ColossusBossEntity.clampTelegraphCap(Integer.MAX_VALUE));
+
         int first = boss.showTelegraph(zone, 40);
         helper.assertTrue(first >= 0, "showTelegraph 该登记成功并回一个 id（-1＝第一道门就把招堵死了）");
         var decoded = boss.telegraphViews();

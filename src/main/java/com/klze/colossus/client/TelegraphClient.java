@@ -36,7 +36,10 @@ import java.util.Map;
  * <p><b>换维度不在这三条里，而且是另一回事</b>（轮 14 P2-1、轮 15 P1-2、轮 16 P3-3 三次修正的同一条）：
  * 1.20.1 换维度时 {@code ClientPacketListener:1029-1041} 直接 new 一个新的 {@code ClientLevel}，
  * <b>不逐个发实体离场事件</b>（全树唯一的客户端 {@code EntityLeaveLevelEvent} 发射点是
- * {@code ClientLevel:972} 的 {@code removeEntity}）。收尾办法是：轮廓按"等级实例变了就作废"清，
+ * {@code ClientLevel.java:972}——它在 {@code ClientLevel.EntityCallbacks#onTrackingEnd} 里，
+ * <b>不在</b> {@code removeEntity} 里（调用者是 {@code TransientEntitySectionManager$Callback#onRemove}）；
+ * 而 {@code stopTicking} 只触发 {@code onTickingEnd}，所以本类依赖的 {@code !isAddedToWorld()}
+ * 判据<b>不会</b>因区块卸载/停 tick 而误剔（轮 17 P3-7 把这条钉死）。收尾办法是：轮廓按"等级实例变了就作废"清，
  * 名单<b>保留</b>、由 {@code boss.level() != mc.level} 逐条剔——因为 {@code EntityJoinLevelEvent}
  * 一个实体一生只发一次，清名单会把这一 tick 刚登记的 Boss 永久抹掉（轮 15 P1-2 就是这个）。
  *
@@ -124,6 +127,11 @@ public final class TelegraphClient {
 
     /** 实体离开客户端世界：顺手清掉它名下的轮廓，别留"没人认领的圈"。 */
     public static void unwatch(ColossusBossEntity boss) {
+        // remove 前先确认"名单里那个就是它"（轮 17 P3-10）：ClientLevel#addEntity 的次序是
+        // post(join) → removeEntity(旧) → addEntity(新)，新对象若复用在场旧对象的 id，
+        // 旧对象的 leave 事件会按 id 把<b>刚 put 进去的新</b>条目删掉，而 join 一生只发一次 ⇒ 永久不盯。
+        Watched held = WATCHED.get(boss.getId());
+        if (held != null && held.boss.get() != null && held.boss.get() != boss) return;
         WATCHED.remove(boss.getId());
         dropOwner(boss.getId());
     }
@@ -173,6 +181,10 @@ public final class TelegraphClient {
         }
 
         Iterator<Map.Entry<Long, Live>> zones = ZONES.entrySet().iterator();
+        // 每条轮廓都独立按寿命折算预算，还不够（轮 17 P2-3 的第二道闸）：8 条 × 96/tick × 40t
+        // ≈ 三万存活粒子。所以每一 tick 先把它清零，下面每画一条就按 `点数 × 寿命` 记账，
+        // 累到 GLOBAL_LIVE_PARTICLE_CAP 之后的圈只拿剩余额度（拿不到就退化成稀疏甚至不画）。
+        liveParticleEstimate = 0;
         while (zones.hasNext()) {
             Live z = zones.next().getValue();
             if (z.endGameTime <= now) { zones.remove(); version++; continue; }
@@ -207,6 +219,14 @@ public final class TelegraphClient {
         if (!ZONES.isEmpty()) version++;
         ZONES.clear();
         lastLevel = null; // static 强引用：不复位就把整张旧 ClientLevel（entityStorage/chunkSource 一长串）扣住
+        // 名单<b>不动</b>（上面 javadoc 的理由），但 <b>memo 必须逐个复位</b>（轮 17 P2-2）：
+        // 改成不清名单之后，forgetTelegraphMemo() 的唯一调用点就只剩 watch() —— 同一张图内调 clear()
+        // 时没人复位，下一 tick `snapshot == memo` 成立 ⇒ takeTelegraphViewsIfChanged() 永远返回 null，
+        // 轮廓冻结到服务端下次 publish，而待办那发照样落 = 一发<b>没有预警</b>的伤害。
+        for (Watched w : WATCHED.values()) {
+            ColossusBossEntity alive = w.boss.get();
+            if (alive != null) alive.forgetTelegraphMemo();
+        }
     }
 
     /** 在途轮廓条数（诊断用）。 */
@@ -251,34 +271,101 @@ public final class TelegraphClient {
         }
     }
 
-    /**
-     * 粒子档的成本上限：<b>到圆环</b>的距离（48 格＝vanilla 那道 32 格闸加 16 格补包余量，
-     * 见 {@link #nearOutlineDistSq}）与每圈点数（96）。
-     *
-     * <p>为什么必须自己节流（轮 14 P2-2）：{@code force=true} 买到"不被距离裁剪"的同时，
-     * 也把 vanilla 那两个<b>事实上的总量闸</b>（{@code LevelRenderer:2511} 的 32 格、
-     * {@code :2514} 的 MINIMAL 整批丢）一起短路掉了；而 vanilla 后面没有兜底——
-     * {@code ParticleEngine#add(:326-337)} 只对 {@code getParticleGroup()} 非空的粒子查容量
-     * （{@code Particle.java:226} 默认返回 {@code Optional.empty()}，END_ROD/DUST 都不在任何 group 里），
-     * 而本版本 {@code ParticleEngine:74 MAX_PARTICLES_PER_LAYER = 16384} 声明后<b>没有任何地方用它</b>。
-     * 一圈 = {@code 2πr·1.5} 个点：r=30 就是 282 个/圈/ tick，八个圈同放足以把帧率打穿。
-     * "修对了可见性"不等于"没引入新的代价"，所以这两道闸放在框架侧。
-     */
+    // ==================== 粒子档的成本闸 ====================
+    //
+    // 为什么必须自己节流（轮 14 P2-2）：{@code force=true} 买到"不被距离裁剪"的同时，
+    // 也把 vanilla 那两个<b>事实上的总量闸</b>（{@code LevelRenderer:2511} 的 32 格、
+    // {@code :2514} 的 MINIMAL 整批丢）一起短路掉了；而 vanilla 后面没有兜底——
+    // {@code ParticleEngine#add(:326-337)} 只对 {@code getParticleGroup()} 非空的粒子查容量
+    // （{@code Particle.java:226} 默认返回 {@code Optional.empty()}，END_ROD/DUST 都不在任何 group 里），
+    // 而本版本 {@code ParticleEngine:74 MAX_PARTICLES_PER_LAYER = 16384} 声明后<b>没有任何地方用它</b>。
+    //
+    // 量纲（轮 17 P3-8 + P2-3，这一轮的真正收获）：稳态活跃粒子 = 每 tick 生成率 × 寿命。
+    // "每 tick 几个"从来不是成本本身，所以两道闸都按存活数定，生成率由 {@code 上限 / 寿命} 反解；
+    // 几何档同理，{@code 2πr·3} 是<b>段</b>数、每段两个顶点 ⇒ 12πr 顶点/帧。
+    // "修对了可见性"不等于"没引入新的代价"，所以这些闸放在框架侧。
+
+    /** 一圈分成多少个槽位＝轮廓的<b>视觉密度</b>（每格圆弧 1.5 个点）。与"每 tick 撒几个"是两件事。 */
+    private static final double POINTS_PER_BLOCK = 1.5D;
+    /** 到<b>圆环</b>而不是到圈心：48 格＝vanilla 那道 32 格闸加 16 格补包余量，见 {@link #nearOutlineDistSq}。 */
     private static final double PARTICLE_CULL_DIST_SQ = 48.0D * 48.0D;
+    private static final int MIN_POINTS_PER_OUTLINE = 8;
     private static final int MAX_POINTS_PER_OUTLINE = 96;
+    /** 一条轮廓<b>稳态</b>允许占用的活跃粒子数（每 tick 的槽位数由它除以寿命得出）。 */
+    private static final int MAX_PARTICLES_PER_OUTLINE = 240;
+    /**
+     * <b>全部</b>在途轮廓合计的活跃粒子天花板（轮 17 P2-3 的第二道闸）。
+     *
+     * <p>为什么单条封顶不够：上一条闸只管"每条 ≤240"，八条同放就是 1920；而多 Boss 场景下投影
+     * 上限本身是 {@code ColossusBossEntity.HARD_MAX_TELEGRAPHS = 32}。所以这里按同一个量纲收口：
+     * 每 tick 给每条圈记 {@code 槽位数 × 寿命} 的账，累到本值之后的圈只拿剩余额度（拿不到就不画）。
+     * 参照物仍是 vanilla 那句死常量——框架不出手就<b>没有</b>总量闸。
+     *
+     * <p>额度不够时<b>先登记的先满足</b>（{@code ZONES} 是插入序）：按距离排序要每帧分配并排序一个数组，
+     * 而这道闸存在的理由正是"别为了精确公平再引入新的成本"。
+     */
+    private static final int GLOBAL_LIVE_PARTICLE_CAP = 2000;
+
+    /** 本 tick 已记的活跃粒子账（只在 {@link #tick()} 的轮廓循环开头清零）。 */
+    private static int liveParticleEstimate = 0;
+
+    /**
+     * 一 tick 给<b>一条</b>轮廓撒多少个<b>槽位</b>——两个式子都抽成<b>纯函数</b>，理由与
+     * {@code ColossusBossEntity.clampTelegraphCap} 同：不抽出来就没人在无图环境下自检它们
+     * （{@code ClientTick}/{@code RenderLevelStageEvent} 那条路 headless 门根本看不见）。
+     *
+     * <p>上一批写的是 {@code MAX_PARTICLES_PER_OUTLINE * 20 / lifetime}——那个 {@code * 20}
+     * 是"每秒"换算串进来的，量纲上把成本放大了 20 倍：寿命 70 那一档实际稳态 68×70＝4760，
+     * 而声称的上限是 240（轮 17 P2-3 复算时才发现，注释说对了单位、式子没照说）。
+     * 现在按定义反解：{@code 生成率 = 上限 / 寿命}。
+     *
+     * @param ringSlots     {@link #ringSlotCount} 的结果（密度）
+     * @param lifetimeTicks 这一发的寿命（{@code end - start}，内部再兜一次 {@code >= 1}）
+     * @param globalRemaining 全局天花板还剩多少额度；可为 0 或负 ⇒ 返回 0（本条不画）
+     */
+    public static int outlineSlotRate(int ringSlots, int lifetimeTicks, int globalRemaining) {
+        int lifetime = Math.max(1, lifetimeTicks);
+        int byOutline = Math.max(1, MAX_PARTICLES_PER_OUTLINE / lifetime); // 下限 1：短命圈至少补一个槽
+        int byGlobal = globalRemaining / lifetime;                          // 剩余额度折算回"这一 tick"
+        return Math.max(0, Math.min(Math.min(byOutline, ringSlots), byGlobal));
+    }
+
+    /**
+     * 轮廓密度：圆周长 → 槽位数（{@code 8..96}，与寿命无关——寿命只影响补多快）。
+     * 与 {@link #outlineSlotRate} 同为 public：无图门（{@code colossusSelfTest}）要能把这两道闸
+     * 的判据跑成会红的断言，而不是让它们只活在注释里。
+     */
+    public static int ringSlotCount(double circumference) {
+        double want = circumference * POINTS_PER_BLOCK;
+        if (!(want > MIN_POINTS_PER_OUTLINE)) return MIN_POINTS_PER_OUTLINE; // NaN 也走这一档
+        return (int) Math.min(want, MAX_POINTS_PER_OUTLINE);
+    }
 
     /** 粒子档：沿轮廓撒一圈。 */
     private static void spawnOutlineParticles(Minecraft mc, Live z) {
         // 按<b>到圆环最近点</b>算，不是到圈心（轮 16 P2-2）：到圈心的话，玩家站在大圈的边缘
         // ——最需要看见它的人——反而整圈一个粒子都不撒，而这道闸恰恰是为了替代
         // vanilla 那条"逐粒子对相机算"的闸（LevelRenderer:2511）而加的，不能比它更严。
-        if (mc.player != null && nearOutlineDistSq(mc.player, z) > PARTICLE_CULL_DIST_SQ) return;
+        // !(d <= LIMIT) 而不是 d > LIMIT：后者对 NaN 判 false ⇒ fail-<b>open</b>，
+        // 一个 NaN 圆心的圈会每 tick 撒满额度粒子，且 force=true 绕过 vanilla 那道闸（轮 17 P3-5）。
+        // 半径/圆心那侧在 TelegraphZone 构造器就被钳成有限值了，所以这一道是<b>第二层</b>而不是唯一一层——
+        // 说清免得下游以为"到这里坐标一定正常"：Live 也可以由第三方直接构造，框架的写法不依赖那个假设。
+        if (mc.player != null && !(nearOutlineDistSq(mc.player, z) <= PARTICLE_CULL_DIST_SQ)) return;
         RandomSource r = mc.level.getRandom();
         ParticleOptions p = z.cachedParticle != null ? z.cachedParticle : (z.cachedParticle = particleFor(z));
-        double circumference = 2 * Math.PI * z.radiusXZ;
-        int points = Math.min(MAX_POINTS_PER_OUTLINE, Math.max(8, (int) (circumference * 1.5)));
-        for (int k = 0; k < points; k++) {
-            double angle = (k + r.nextDouble() * 0.5) / points * Math.PI * 2;
+        int lifetime = (int) Math.max(1L, z.endGameTime - z.startGameTime);
+        int ringSlots = ringSlotCount(2 * Math.PI * z.radiusXZ);
+        int rate = outlineSlotRate(ringSlots, lifetime, GLOBAL_LIVE_PARTICLE_CAP - liveParticleEstimate);
+        if (rate <= 0) return; // 全局额度已被前面的圈用完：变稀/暂不画，而不是把帧率换掉
+        liveParticleEstimate += rate * lifetime; // 记账单位＝存活数（=率×寿命），与两道闸同量纲
+        // 槽位随 tick <b>轮转</b>而不是每 tick 重画同一批（轮 17 P2-3）：旧写法把"每 tick 几个"
+        // 和"一圈分几段"用同一个变量表达，于是 rate=3 的长命圈只在 3 个角度上叠出一条螺旋，
+        // 圈根本合不上。轮转后 rate 个槽位在 lifetime 内铺满 ringSlots 个角度。
+        long elapsed = mc.level.getGameTime() - z.startGameTime;
+        long firstSlot = Math.floorMod(elapsed * rate, (long) ringSlots);
+        for (int k = 0; k < rate; k++) {
+            double slot = (firstSlot + k) % ringSlots;
+            double angle = (slot + r.nextDouble() * 0.5) / ringSlots * Math.PI * 2;
             // 必须是**带 boolean 的那个重载**（轮 14 P1-1，我上一批修的其实是半条）：
             // 7 参形态在 1.20.1 是 {@code ClientLevel.java:597-598 → levelRenderer.addParticle(p, false, true, …)}，
             // 第一个实参 force 被写死成 <b>false</b> ⇒ {@code LevelRenderer.java:2509} 的短路走不到，
@@ -310,14 +397,19 @@ public final class TelegraphClient {
         return radial * radial + dy * dy;
     }
 
+    /**
+     * 粒子档的选项。<b>只有 {@code "spark"} 才用 END_ROD，其余一律 dust</b>（轮 17 P2-3）：
+     * 这方法只在 {@code hasStyle} 为假时被调用，所以旧写法的 else 分支实际是
+     * "样式名拼错 ⇒ 静默拿到最贵的一档"——END_ROD 寿命 60~71t（{@code EndRodParticle:16}）、
+     * dust 约 9~48t（{@code DustParticleBase:26-27}），同一生成率下稳态活跃数差 4 倍多。
+     * 未知名字回落到 dust 也与 {@code TelegraphZone} 构造器对空白 visual 的回落同一口径。
+     */
     private static ParticleOptions particleFor(Live z) {
-        if ("dust".equals(z.visual)) {
-            return new DustParticleOptions(new org.joml.Vector3f(
-                    ((z.colorRGB >> 16) & 0xFF) / 255f,
-                    ((z.colorRGB >> 8) & 0xFF) / 255f,
-                    (z.colorRGB & 0xFF) / 255f), 1.2f);
-        }
-        return ParticleTypes.END_ROD;
+        if ("spark".equals(z.visual)) return ParticleTypes.END_ROD;
+        return new DustParticleOptions(new org.joml.Vector3f(
+                ((z.colorRGB >> 16) & 0xFF) / 255f,
+                ((z.colorRGB >> 8) & 0xFF) / 255f,
+                (z.colorRGB & 0xFF) / 255f), 1.2f);
     }
 
     private TelegraphClient() {}

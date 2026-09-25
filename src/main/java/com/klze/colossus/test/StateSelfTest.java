@@ -20,6 +20,10 @@ public final class StateSelfTest {
     private static int failures = 0;
 
     public static void main(String[] args) {
+        // 本门<b>不能</b>碰任何 Entity 后代：轮 17 试过一次显式 `Bootstrap.bootStrap()`，
+        // 结果是 Forge 在 :62 注入的 `NetworkHooks.init()` 直接炸
+        // （NoSuchMethodException: NetworkEvent.<init>()——它要的是 mod 总线，独立 JVM 没有）。
+        // 所以"要活的注册表"的判据一律放 GameTest（那一道有真服务器），这里只留纯数据。
         testPushAndPop();
         testInterruptGate();
         testForcePushOverridesGate();
@@ -334,6 +338,10 @@ public final class StateSelfTest {
         }
         check("12 probe ids all land in 1..128 (0 stays reserved as the empty-slot sentinel)",
                 valuesInValueRange);
+
+        // === 轮 17 P3-2：telegraph 投影上限的钳位此前零自检（改回 0 也全绿） ===
+        // 断言住在 GameTest 的 telegraph 那一条里（clampTelegraphCap 四档），不在这里：
+        // 它是 ColossusBossEntity 的静态方法，而本门连 <clinit> 都起不动（main 顶上那条说明）。
         var h5 = new com.klze.colossus.move.MoveHistory();
         h5.record(roar);
         var restored = new com.klze.colossus.move.MoveHistory();
@@ -510,16 +518,64 @@ public final class StateSelfTest {
                         && huge.settleDelayTicks() > 0 && huge.lifetimeTicks() > 0);
         // 关系不变量：轮廓必须比"那一发的结算时刻"<b>活得久</b>（先消失的就是"伤害凭空落下"）
         boolean outlineOutlivesBurst = true;
-        for (int w : new int[]{0, 1, 5, 30, 60, com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS}) {
+        int warnCap = com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS;
+        for (int w : new int[]{0, 1, 5, 30, 60, warnCap, warnCap + 1, Integer.MAX_VALUE, -5}) {
             var z = new com.klze.colossus.env.TelegraphZone(0, 0, 0, 4, 1, w, 0, "dust");
-            outlineOutlivesBurst &= z.lifetimeTicks() >= z.settleDelayTicks()
-                    && z.settleDelayTicks() == Math.max(1, w + 1);
+            // 断的是"钳后的值"而不是输入值：否则越界那三档会拿 max(1,w+1) 去比钳位结果，
+            // 恰好把钳位本身判成 bug（轮 17 P3-4 复算时发现我第一版就是这么写错的）。
+            int want = Math.min(Math.max(w, 0), warnCap);
+            outlineOutlivesBurst &= z.warnTicks() == want
+                    && z.settleDelayTicks() == Math.max(1, want + 1)
+                    && z.lifetimeTicks() >= z.settleDelayTicks()
+                    && z.lifetimeTicks() > 0 && z.settleDelayTicks() > 0;
         }
         check("across every legal warn: outline lifetime >= burst delay (one shared formula)",
                 outlineOutlivesBurst);
         var blankVisual = new com.klze.colossus.env.TelegraphZone(0, 0, 0, 4, 1, 20, 0, "  ");
         check("a blank visual falls back to the particle tier instead of rendering nothing at all",
                 "dust".equals(blankVisual.visual()));
+
+        // === 轮 17 P3-5 后半 / P3-11 / P2-3：圆心钳位、样式名一条规则、粒子成本按存活数量纲封顶 ===
+        var far = new com.klze.colossus.env.TelegraphZone(Double.NaN, 1e30, -1e30, 4, 1, 20, 0, "dust");
+        // 只断"钳后的运行时值"。原先这里还有一条 `MAX_CENTER_ABS == WorldBorder.MAX_CENTER_COORDINATE`，
+        // 但两边都是编译期常量 ⇒ javac 直接折成 true（轮 11 那个 static 断言的同一个坑），
+        // 常量值本身由 javac 的常量内联保证，写在断言里是装饰不是判据。
+        check("center coords are clamped: NaN->0, |v|->+-MAX_CENTER_ABS, and the box stays finite",
+                far.cx() == 0.0
+                        && far.cy() == com.klze.colossus.env.TelegraphZone.MAX_CENTER_ABS
+                        && far.cz() == -com.klze.colossus.env.TelegraphZone.MAX_CENTER_ABS
+                        && Double.isFinite(far.box().maxX) && Double.isFinite(far.box().minZ));
+        check("\"no visual written\" has exactly one rule (null / \"\" / blank all land on DEFAULT_VISUAL)",
+                com.klze.colossus.env.TelegraphZone.DEFAULT_VISUAL.equals(
+                        com.klze.colossus.env.TelegraphZone.visualOrDefault(null))
+                        && com.klze.colossus.env.TelegraphZone.DEFAULT_VISUAL.equals(
+                        com.klze.colossus.env.TelegraphZone.visualOrDefault(""))
+                        && com.klze.colossus.env.TelegraphZone.DEFAULT_VISUAL.equals(
+                        com.klze.colossus.env.TelegraphZone.visualOrDefault(" \t "))
+                        && "ring".equals(com.klze.colossus.env.TelegraphZone.visualOrDefault("ring")));
+        // 稳态活跃粒子 = 率 × 寿命（轮 17 P2-3 复算发现的正是这一档：上一批式子里多乘了 20，
+        // 声称上限 240 而实际 4760）。这里断的是<b>量纲</b>，所以取几个寿命各算一遍。
+        boolean unitsHold = true;
+        for (int life : new int[]{1, 11, 70, 300, 1210}) {
+            int rate = com.klze.colossus.client.TelegraphClient.outlineSlotRate(96, life, 2000);
+            // 允许的那一档溢出是"每 tick 至少补一个槽"这个地板：最坏多占一个寿命的量
+            unitsHold &= rate >= 0 && rate <= 96 && rate * life <= Math.max(240, life);
+        }
+        check("per-outline particle budget is bounded in live-particle units (rate x lifetime)", unitsHold);
+        int booked = 0;
+        int funded = 0;
+        for (int i = 0; i < 40; i++) { // 40 条同放（> HARD_MAX_TELEGRAPHS 的两倍，故意压满）
+            int rate = com.klze.colossus.client.TelegraphClient.outlineSlotRate(96, 70, 2000 - booked);
+            if (rate <= 0) continue;
+            booked += rate * 70;
+            funded++;
+        }
+        check("the global ledger never books more than the cap, and the tail of the batch gets nothing",
+                booked <= 2000 && funded > 0 && funded < 40);
+        check("outline density is a per-tick-independent band (small ring 8, huge 96, NaN 8)",
+                com.klze.colossus.client.TelegraphClient.ringSlotCount(0.5) == 8
+                        && com.klze.colossus.client.TelegraphClient.ringSlotCount(2 * Math.PI * 256) == 96
+                        && com.klze.colossus.client.TelegraphClient.ringSlotCount(Double.NaN) == 8);
 
         var burst = new com.klze.colossus.env.ZoneBurst(6.0f, 0.5f, 40)
                 .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.0f, 0));

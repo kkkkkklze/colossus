@@ -173,6 +173,29 @@ final class MoveJsonSelfTest {
                 rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
                         + "'zone':{'kind':'circle_ahead','radius':0.0},'effect':{'kind':'damage','damage':1.0}}}] }",
                         "radius"));
+        // 边界的另一半（本仓轮 9 的口径）：只测"超了拒"的话，把 `>` 写成 `>=` 也全绿
+        check.accept("radius exactly at MAX_RADIUS still decodes (cap boundary is inclusive)",
+                decodes("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':256.0},"
+                        + "'effect':{'kind':'damage','damage':1.0}}}] }"));
+        check.accept("warn exactly at MAX_WARN_TICKS still decodes",
+                decodes("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':4.0,'warn':1200},"
+                        + "'effect':{'kind':'damage','damage':1.0}}}] }"));
+        check.accept("one tick over the warn cap is refused",
+                rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':4.0,'warn':1201},"
+                        + "'effect':{'kind':'damage','damage':1.0}}}] }", "warn"));
+        // 半径那一侧也要"两头都有"（轮 17 P3-3）：上一批只加了 256.0 收 / 1e9 拒，
+        // 而 1e9 那一条挡不住把 `>` 写成 `>=`——真正的边界值是 256.1。
+        check.accept("one block over MAX_RADIUS is refused (boundary is exclusive above the cap)",
+                rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':256.1},"
+                        + "'effect':{'kind':'damage','damage':1.0}}}] }", "radius"));
+        check.accept("non-finite center is refused and names the field (forward/side are world coords)",
+                rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':4.0,'forward':1e300},"
+                        + "'effect':{'kind':'damage','damage':1.0}}}] }", "forward"));
         check.accept("oversized warn window is refused before it can overflow the lifetime math",
                 rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
                         + "'zone':{'kind':'circle_ahead','radius':4.0,'warn':2147483647},"

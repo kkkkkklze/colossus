@@ -68,8 +68,10 @@ public final class ColossusClientHooks {
     // 才由 ClientLevel:339 置位）。
     @SubscribeEvent(priority = net.minecraftforge.eventbus.api.EventPriority.LOWEST)
     public static void onEntityJoin(net.minecraftforge.event.entity.EntityJoinLevelEvent event) {
-        // 先判取消（轮 14 P3-7）：ClientLevel:336 是**先 post 再 entityStorage.addEntity**，
-        // 第三方取消这条事件时实体根本没进图，却已被我们 watch ⇒ 它的投影会读成"看得见的圈"
+        // 真兜底是 TelegraphClient.tick() 里的 !isAddedToWorld()（置位点 ClientLevel:339，
+        // 正好在 entityStorage.addEntity 之后）。这个 isCanceled() 分支其实**进不来**：
+        // eventbus 6.0.5 的 ASMEventHandler 会跳过所有 receiveCanceled=false 的监听器（javap 复核），
+        // 即"已被取消"时我们根本不被调用——留着只当 defensive，别再当第一道防线写（轮 17 P3-6）
         if (event.isCanceled() || !event.getLevel().isClientSide()) return;
         if (event.getEntity() instanceof com.klze.colossus.entity.ColossusBossEntity boss) {
             TelegraphClient.watch(boss);

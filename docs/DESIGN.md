@@ -98,10 +98,21 @@ protected void registerMoves(MoveSetBuilder m) {
 - **招式表登记的故障隔离**（轮 9）：Java DSL 的 `registerMoves` 运行期第一次跑在 `moveSet()` 里，而它的调用点在 `aiStep` 的选招分支——1.20.1 `Level#guardEntityTick` 抓到 Throwable 之后是 `throw new ReportedException`（`removeErroringEntities` 默认 false），所以坏数据会炸成"玩家进战即崩服"。现在 `moveSet()` 整段包 `catch`：报一次 error、沿用上一张好表（首建失败则空表），配合 `MoveBuilder.anim()` 的 setter 校验 + `MoveDef` 构造器的值域闸门，让作者拿到**带招式名**的报错而不是崩溃循环。
 - **缩放**：`finalizeSpawn` + 每 10t 复查附近存活玩家数，`ScalingStrategy` 默认 `1+(sqrt(n)-1)*0.5`，用 `addTransientModifier` + 血量百分比回填。
 
-### 2.4 同步契约（entityData，全 int/bool/string）
+### 2.4 同步契约（entityData：int/bool/string + 一条 COMPOUND_TAG）
 `PHASE / ATTACK_ID / ATTACK_ANIM / ATTACK_DURATION / ATTACK_TICK / ATTACK_SEQ / SHIELD / DEATH_TICK / ACTIVATED`；
 客户端渲染器与动画适配器只读这些串/数（`ATTACK_ANIM` 就是动画名，`ATTACK_SEQ` 用来分辨"连放同一招"的新一次施法），
 **不需要持有招式表**——datapack 表在多人客户端可能根本没加载（轮 6 P1，旧 `ATTACK_INDEX` 形态因此作废）。血条样式走 `BarStyleS2C{barUUID, renderType}`，护盾走 `BarShieldS2C`。
+
+第二条通道是 **`DATA_TELEGRAPHS`（`EntityDataSerializers.COMPOUND_TAG`）**——在途危险区的投影，
+形态 `{views:[{cx,cy,cz,rXZ,rY,warn,color,visual,id,start,end}]}`，`start/end` 是**绝对 gameTime**（第二十四批改的根据：
+vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份全量快照，中途进场/重进世界/存档重载三条都不用写补包代码）。
+它不是"随便一个标签"，载荷有硬界：**一条 view 约 140 B，条数上限 `HARD_MAX_TELEGRAPHS = 32` ⇒ 一轮全量广播 ≤ ~4.5 KiB**，
+离 `FriendlyByteBuf#readNbt` 的 2 MiB accounter 差三个数量级；默认同时在地上的条数是 `MAX_ACTIVE_TELEGRAPHS = 8`，
+子类按 `maxActiveTelegraphs()` 抬，抬出去的值还要过 `clampTelegraphCap()`（钳到 `1..32`，越界一次性 warn）。
+为什么下界是 1 而不是 0：`0` 会让 `size() >= cap` 恒真 ⇒ 这个 Boss **所有带预警的招一招不落**，
+而"关掉投影却仍落伤害"＝制造没预警的攻击，那比少一格容量严重得多（轮 17 设计偏差第 2 条的裁决，
+要"不做预警"请在招式表里别用 telegraph 帧）。
+
 
 ## 3. v0.1 范围裁定
 
@@ -112,6 +123,13 @@ protected void registerMoves(MoveSetBuilder m) {
 
 无头优先（用户无法操作客户端）：
 1. `gradlew build` 绿——状态机/selector/相位/缩放曲线写 **JUnit-free 纯逻辑自检**（`state`/`move` 包不 import net.minecraft，可被 `dev.klze.colossus.test` 的 main 方法 runner 直接跑）。
+   **边界（第二十八批实测钉死）**：`colossusSelfTest` 那个 JVM 里**不能**出现任何要初始化 `Entity` 的断言——
+   第一次触碰 `ColossusBossEntity` 的 `<clinit>` 就报 `IllegalArgumentException: Not bootstrapped`
+   （`MappedRegistry` 构造器 → `Bootstrap.checkBootstrapCalled`），而显式补 `Bootstrap.bootStrap()` 也救不回来：
+   Forge 在 `Bootstrap:62` 注入的 `NetworkHooks.init()` 在独立进程里必炸
+   （`NoSuchMethodException: NetworkEvent.<init>()`，它要的是 mod 总线）。
+   ⇒ **要活的注册表/实体类的判据一律放 GameTest**（例如 `clampTelegraphCap` 的四条）；
+   纯数据与纯函数（record 钳位、JSON 解码、粒子预算式子）留在自检里，那一道仍是最快的门。
 2. GameTest（`colossus:boss_smoke`）：生成示范 Boss → 断言 bar 装配/状态机切换/判定命中玩家假实体。
 3. 数据断言：KillBoard NBT、`ATTACK_*`/`SHIELD`/`colossus_works` 同步值从磁盘/世界回读。
 
@@ -148,6 +166,32 @@ protected void registerMoves(MoveSetBuilder m) {
 
 ### 6.3 环境层（`env`），按性价比排序
 1. **TelegraphZone**（两形态）：数据形态（BR IceSpike：区域由 delay 标量推导，零包，到期 AABB 一次性结算）与实体形态（CAT LightningArea：可扩散、周期结算）。触发时刻由 `MoveDef` 帧表声明——BR 依赖的 GeckoLib 关键帧指令在我们的状态机里有现成等价物。客户端契约（第二十四批改过）：轮廓形状住在 Boss 的 `DATA_TELEGRAPHS`（一份`{views:[{几何…, id, start, end}]}` 的 SynchedEntityData 标签），渲染在 `RenderLevelStageEvent` 画贴地 quad，粒子档走 `addAlwaysVisibleParticle`。旧的 `ZoneSync` 单发包已删除——理由见 §7 第二十四批。
+
+   **形状侧的边界值（规格正文，不只在 javadoc 里——轮 17 设计偏差第 1 条）**。全部钳在 `TelegraphZone` 的规范构造器，
+   因为同一个 `radius` 会被三条路各自放大成事故（粒子档每 tick 生成数、几何档**每帧 `12πr` 顶点**——
+   `segs = 2πr·3` 是**段**数、每段两个顶点，轮 17 P3-8 把先前"6πr"那个说小了 2 倍的口径改准；
+   以及服务端 `getEntitiesOfClass(巨大 AABB)` 的扫场：`EntitySectionStorage:34-62` 的 x 方向循环在 1.20.1 **没有体积护栏**，
+   `r=1e9` 是 1.25 亿次外层循环＝服务端线程挂死）。
+
+   | 量 | 界 | 超了怎样 |
+   |---|---|---|
+   | `radiusXZ` / `radiusY` | `(0, MAX_RADIUS=256]`，NaN/≤0 回落 `1.0` | JSON：`circle_ahead.radius` 字段级拒；DSL：一次性 warn + 钳；坏存档：静默钳 |
+   | `warnTicks` | `[0, MAX_WARN_TICKS=1200]`（60 s；`Integer.MAX_VALUE` 会让 `settle`/`lifetime` 双双溢出） | 同上三档 |
+   | `forward` / `side`（圈心相对 Boss 的偏移） | 有限且 `\|v\| ≤ MAX_AHEAD_OFFSET=2048` | JSON 字段级拒；DSL warn + 钳。**这是选型规则不是推导**：再远的落点该做成弹道实体，而不是贴地块 |
+   | `cx/cy/cz`（绝对圈心） | 有限且 `\|v\| ≤ MAX_CENTER_ABS`（取 vanilla `WorldBorder.MAX_CENTER_COORDINATE = 2.9999984E7`；该常量在本版本声明后无人使用，与 `ParticleEngine.MAX_PARTICLES_PER_LAYER` 同一类死常量） | 只钳不打（炸在 `readAdditionalSaveData`／渲染路径＝区块一加载就崩） |
+   | `visual` | 非空字符串；`null`/空/全空白 → `DEFAULT_VISUAL="dust"` | 判据只有 `visualOrDefault` 一份（轮 17 P3-11 之前是 `isEmpty`/`isBlank` 两套） |
+   | `FADE_TICKS` | 10（结算后的淡出尾巴，`lifetimeTicks() = max(1,warn) + FADE`） | — |
+
+   **三条入口的口径故意不同**：作者写的（JSON）越界要**响**——`MoveCodec` 逐字段拒并点名；DSL（`damageCircle`）越界
+   **warn 一次再钳**（形状在 `registerMoves` 里现算，抛出来会整张表回落到上一版，代价大于收益，但静默改值不可接受）；
+   坏存档/恶意服务端**只钳不打**。轮 17 P2-1 抓到的正是本条曾经写成"JSON/DSL 都响"——DSL 那一档当时并没有任何回执。
+
+   **密度选型规则**（轮 17 设计偏差第 3 条，作者必须知道）：粒子档的槽位数 `= clamp(2πr·1.5, 8, 96)`、
+   每 tick 补的槽位数 `= clamp(240 / 寿命, 1, 槽位数)`（**稳态活跃粒子 = 生成率 × 寿命**，所以预算按存活数记，
+   全部轮廓合计再受 `GLOBAL_LIVE_PARTICLE_CAP = 2000` 这道总闸约束）；线框档 `segs = clamp(2πr·3, 24, 768)`。
+   于是"圈越大点越稀"：`r=256` 时粒子档约每 16.7 格一个点（基本读不出来），线框档每段约 2.1 格（明显多边形）
+   ⇒ **半径 > ~24 请配 `visual:"ring"`**，粒子档只适合近战量级的小圈。
+
 2. **ArenaBlockAccess**：`clearBox(sweep, filter)`（NagaSmash 形）+ `applyPattern(offsetTable, facing, state)`（Yeti BREAK_1..4 形）+ mobGriefing/方块 tag 豁免门控。
 3. **结构保护 + POI 解锁**：`StructureDestructionEvents` 近乎可照搬；"已击败"用 POI 查询而非读结构 NBT（成本最低）；`getAllStructuresAt` 结果按 chunkKey 缓存。
 4. **ArenaSession 最小闭环**：closeOffExit 封路（InfernalDragon 形）+ 团灭弹出 + **加载闸门**（arena 未加载则相位不推进——Kraken 教训）。
@@ -723,3 +767,42 @@ protected void registerMoves(MoveSetBuilder m) {
 > 验证：build（`-Pgecko`）+ 自检 **108/108**（+8）+ audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。客户端路径（粒子成本、几何档顶点数）仍只能靠代码与算术证据，
 > 无头门对它瞎这件事本批已写进口径。
+
+> 进度（2026-09-25 第二十八批·审查轮 17 处置：**四道钳位逐个算了账，于是要补的不是"更多钳位"而是"量纲与配套"**）：
+> ✅ 单位口径修正两处——①粒子档的"总量闸"原先按 `每 tick 生成数` 定，而成本是 `稳态存活数 = 生成率 × 寿命`，
+> 式子里那个 `* 20` 是"每秒"换算串进来的 ⇒ 声称单条 240、寿命 70 那一档实际 4760（错 20 倍）。
+> 现在按定义反解 `生成率 = 上限 / 寿命`，并把"每 tick 撒几个"与"一圈分几段"拆成 `outlineSlotRate` / `ringSlotCount`
+> 两个 **public static 纯函数**（槽位随 tick 轮转，长命圈这才合得上），另加一条合计闸
+> `GLOBAL_LIVE_PARTICLE_CAP = 2000`：每 tick 按 `槽位 × 寿命` 记账，先登记的先满足，后面的只拿剩余额度。
+> ②几何档顶点数从"6πr"改准成 **12πr/帧**（`segs = 2πr·3` 是段数、每段两顶点）。
+> ✅ 上一批改动的连带断腿补上：`clear()` 不再清名单 ⇒ `forgetTelegraphMemo()` 只剩 `watch()` 一个调用点，
+> 同一图内调 `clear()` 后 `snapshot == memo` 恒成立、轮廓冻结到服务端下次 publish，而待办那发照落＝没预警的伤害。
+> 现在 `clear()` 对名单里的存活弱引用逐个复位 memo（不 remove 条目，所以不退回轮 15 P1-2）。
+> ✅ 三条"半条修复"收口：`showTelegraph(zone, ticks)` 的裸 `ticks` 现在过 `max(ticks, zone.lifetimeTicks())`
+> （public 面不再能作废"轮廓活得比结算久"这条不变量）；`particleFor` 只有 `"spark"` 给 END_ROD、
+> 未知样式名一律回落 dust（旧写法＝样式名拼错静默选到成本 4 倍多的一档）；`unwatch` 加身份判据
+> （`ClientLevel#addEntity` 是 post(join)→remove(旧)→add(新)，按 id remove 会把新条目抹掉）。
+> ✅ 圆心这一档：`clampCoord` 把非有限数收成 0、绝对坐标钳到 `MAX_CENTER_ABS`（取 vanilla
+> `WorldBorder.MAX_CENTER_COORDINATE = 2.9999984E7`，注释顺手钉"本版本该常量声明后无人使用"），
+> 粒子距离闸从 `d > LIMIT`（NaN 判 false＝fail-open）改成 `!(d <= LIMIT)`；JSON 侧对 `forward`/`side`
+> 给字段级拒（有限且 ≤ `MAX_AHEAD_OFFSET = 2048`，理由写成选型规则而不是假推导），DSL 侧 warn + 钳。
+> ✅ "作者写的要响"这句终于名副其实：`TelegraphZone.clampNotice`/`offsetNotice` + `damageCircle` 的一次性 warn
+> ——轮 17 P2-1 抓到的是**本仓第五次**"javadoc 宣称有回执、代码里没有"（那次写的是"JSON/DSL 都响"，实际 DSL 零回执）。
+> ✅ `visual` 的"没写"判据收成一份（`DEFAULT_VISUAL` + `visualOrDefault`），消掉 `isEmpty`/`isBlank` 两套口径。
+> ✅ 规格正文补齐（轮 17 设计偏差第 1、3 条）：§6.3 加了一张**边界值表**（每个量的界 + 三条入口各自的口径）
+> 与**密度选型规则**（`r=256` 时粒子档约每 16.7 格一点、线框档每段 2.1 格 ⇒ 半径 > ~24 请用 `visual:"ring"`），
+> §2.4 补 `DATA_TELEGRAPHS` 与 `HARD_MAX_TELEGRAPHS` 的载荷账（一条 view 约 140 B、32 条 ≤ ~4.5 KiB）。
+> ✅ 判据从"装饰"改成"会红"：钳位边界的两头都要有（新增 `radius:256.1 拒`），warn 那条循环断言改成
+> **断钳后的值**并把输入集扩到 `{1200,1201,Integer.MAX_VALUE,-5}`，`clampTelegraphCap` 的四条断言落在 GameTest。
+> ⚠ 一条硬事实由本批钉住并写进 §4：**`colossusSelfTest` 起不动任何 `Entity` 的 `<clinit>`**——
+> 试 `Bootstrap.bootStrap()` 会炸在 Forge 注入的 `NetworkHooks.init()`（`NoSuchMethodException: NetworkEvent.<init>()`），
+> 所以"要活注册表"的判据只能放 GameTest。这不是被测代码的问题，但决定以后判据往哪写。
+> 未采纳的裁决：轮 17 设计偏差第 2 条建议"承认 `maxActiveTelegraphs()==0` 是合法语义"或补
+> `telegraphProjectionsEnabled()` 钩子——**不补**，"投影关掉而伤害照落"＝制造没预警的攻击，
+> opt-out 的正确写法是在招式表里别用 telegraph 帧；下界仍钳到 1，且日志明写这不是开关。
+> 未做（继续挂）：状态栈快照（v12a/v12b 形态已定：招内相对 tick + fired 位图 + 绝对时刻作废）、
+> 跨招关系三件原语（v12b）、`DATA_DEATH_TICK`、`ZoneWork` 扫场成本的独立上限、许可证仍 ARR。
+> 验证：build（`-Pgecko`）+ 自检 **118/118**（本批 +10，从 `615f449` 的 108 起：StateSelfTest 72→77、
+> MoveJsonSelfTest 36→41）+ audit **14** + `runGameTestServer`
+> **All 14 required tests passed**（两轮）。客户端渲染路径仍只有代码+算术证据，
+> 但两道预算式子已抽成纯函数、自检能把它们跑红。
