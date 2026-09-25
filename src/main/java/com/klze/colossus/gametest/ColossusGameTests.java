@@ -392,6 +392,39 @@ public class ColossusGameTests {
     }
 
     /**
+     * 延迟工作的持久化回归（第十六批）：排一条 60t 后结算的危险区爆发，
+     * 把 Boss 序列化进 NBT、在另一个实例上读回来——队列必须还在、到期时刻仍是"未来"，
+     * 且到点真的打伤圈内实体。旧形态（Runnable + tickCount）在这里必然丢队列或算错时刻。
+     */
+    @GameTest(template = YARD, timeoutTicks = 300, batch = "deferred-work")
+    public void deferredWorkSurvivesSaveAndStillSettles(GameTestHelper helper) {
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        var cow = helper.spawn(net.minecraft.world.entity.EntityType.COW, new BlockPos(4, 3, 4));
+        var zone = com.klze.colossus.env.TelegraphZone.damageCircle(boss, 0.0, 0.0, 6.0, 60, 0xFF4040);
+        float hpBefore = cow.getHealth();
+
+        boss.scheduleWork(60, com.klze.colossus.env.ZoneWork.KIND,
+                com.klze.colossus.env.ZoneWork.encode(zone,
+                        new com.klze.colossus.env.ZoneBurst(4.0f, 0.0f, 0)));
+        helper.assertTrue(boss.pendingWorkCount() == 1, "排完应当有一条在途待办");
+
+        var tag = new net.minecraft.nbt.CompoundTag();
+        boss.saveWithoutId(tag);
+        ColossusBossEntity revived = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        revived.load(tag);
+        helper.assertTrue(revived.pendingWorkCount() == 1,
+                "读档后队列必须还在（实际 " + revived.pendingWorkCount() + " 条＝没持久化）");
+        helper.runAfterDelay(75, () -> {
+            helper.assertTrue(cow.getHealth() < hpBefore || cow.isRemoved(),
+                    "到点后圈内的实体必须吃到这一发（牛 " + cow.getHealth() + "/" + hpBefore + "）");
+            helper.assertTrue(revived.pendingWorkCount() == 0, "结算完队列要排空");
+            helper.succeed();
+        });
+    }
+
+    /**
      * 登记期校验回归（审查 P1#3）：坏窗口必须 build 招式表时就抛——
      * 留到出招那 tick 抛＝炸在 serverAiStep 里，持久 Boss 变崩溃循环。
      */

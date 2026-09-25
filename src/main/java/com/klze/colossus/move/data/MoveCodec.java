@@ -71,7 +71,8 @@ public final class MoveCodec {
     }
 
     private interface EffectDecoder {
-        java.util.function.Function<ColossusBossEntity, ZoneEffect> decode(JsonObject el) throws MoveDataException;
+        /** 解成一条 {@link com.klze.colossus.env.ZoneBurst} 增量（与 Java DSL 的 telegraph 同一数据形状 ⇒ 可入 NBT）。 */
+        com.klze.colossus.env.ZoneBurst decode(JsonObject el) throws MoveDataException;
     }
 
     private interface ConditionDecoder {
@@ -114,8 +115,9 @@ public final class MoveCodec {
         });
         registerTrigger("telegraph", (JsonObject el, int depth) -> {
             var zone = decodeZoneField(el.get("zone"), "zone");
-            var effect = decodeEffectField(el.get("effect"), "effect");
-            return MoveTriggers.telegraph(zone, effect);
+            var burst = decodeEffectField(el.get("effect"), "effect");
+            return MoveTriggers.telegraph(zone, b -> burst);
+
         });
         registerTrigger("telegraph_visual", (JsonObject el, int depth) -> MoveTriggers.telegraphVisual(decodeZoneField(el.get("zone"), "zone")));
 
@@ -130,11 +132,11 @@ public final class MoveCodec {
 
         EFFECT_KINDS.put("damage", el -> {
             DamageEffect d = orThrow(decode(el, DamageEffect.CODEC), "effect.damage");
-            return boss -> ZoneEffect.damageOnly(d.damage(), d.knockback());
+            return new com.klze.colossus.env.ZoneBurst(d.damage(), d.knockback(), 0);
         });
         EFFECT_KINDS.put("freeze", el -> {
             FreezeEffect d = orThrow(decode(el, FreezeEffect.CODEC), "effect.freeze");
-            return boss -> ZoneEffect.freeze(d.ticks());
+            return new com.klze.colossus.env.ZoneBurst(0.0f, 0.0f, d.ticks());
         });
 
         CONDITION_KEYS.put("phase_in", value -> {
@@ -339,17 +341,17 @@ public final class MoveCodec {
         return d.decode(obj);
     }
 
-    private static java.util.function.Function<ColossusBossEntity, ZoneEffect> decodeEffectField(
+    private static com.klze.colossus.env.ZoneBurst decodeEffectField(
             JsonElement el, String field) throws MoveDataException {
-        // effect 支持单个对象或数组（数组按 and() 组合）——"伤害+冻结"是内容最常配的组合
+        // effect 支持单个对象或数组：数组＝多条合并成一次爆发（damage+freeze 是内容最常配的组合）。
+        // 词汇表刻意只有这两格——要往 telegraph 里塞自定义 ZoneEffect 就得先给它一个 NBT 形态，
+        // 因为这条路径上的东西必须能进存档（延迟队列第十六批起是持久化的）。
         if (el instanceof JsonArray arr) {
-            List<java.util.function.Function<ColossusBossEntity, ZoneEffect>> parts = new ArrayList<>();
-            for (int i = 0; i < arr.size(); i++) parts.add(decodeEffectField(arr.get(i), field + "[" + i + "]"));
-            return boss -> {
-                ZoneEffect acc = parts.get(0).apply(boss);
-                for (int i = 1; i < parts.size(); i++) acc = acc.and(parts.get(i).apply(boss));
-                return acc;
-            };
+            com.klze.colossus.env.ZoneBurst acc = com.klze.colossus.env.ZoneBurst.NONE;
+            for (int i = 0; i < arr.size(); i++) {
+                acc = acc.merge(decodeEffectField(arr.get(i), field + "[" + i + "]"));
+            }
+            return acc;
         }
         if (!(el instanceof JsonObject obj)) throw new MoveDataException(field, "expected object or array");
         String kind = requireString(obj, "kind");

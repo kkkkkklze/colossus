@@ -2,6 +2,7 @@ package com.klze.colossus.env;
 
 import com.klze.colossus.entity.ColossusBossEntity;
 import net.minecraft.core.BlockPos;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.LivingEntity;
 import net.minecraft.world.phys.AABB;
@@ -44,6 +45,28 @@ public record TelegraphZone(double cx, double cy, double cz,
         double cz = boss.getZ() + fz * forward + fx * side;
         double cy = boss.getY() + 0.1;
         return new TelegraphZone(cx, cy, cz, radiusXZ, 1.0, warnTicks, colorRGB, "dust");
+    }
+
+    /**
+     * 落盘形态。延迟结算要能跨存档，区域就必须可序列化——存的是<b>解算后的世界坐标</b>：
+     * 出招那一刻的位置才是要结算的位置，重载后 Boss 走了也不该把圈子拖走。
+     */
+    public CompoundTag toTag() {
+        CompoundTag tag = new CompoundTag();
+        tag.putDouble("cx", this.cx);
+        tag.putDouble("cy", this.cy);
+        tag.putDouble("cz", this.cz);
+        tag.putDouble("rXZ", this.radiusXZ);
+        tag.putDouble("rY", this.radiusY);
+        tag.putInt("color", this.colorRGB);
+        tag.putString("visual", this.visual);
+        return tag;
+    }
+
+    public static TelegraphZone fromTag(CompoundTag tag) {
+        return new TelegraphZone(tag.getDouble("cx"), tag.getDouble("cy"), tag.getDouble("cz"),
+                tag.getDouble("rXZ"), tag.getDouble("rY"), 0, tag.getInt("color"),
+                tag.getString("visual"));
     }
 
     /** 换渲染样式（"dust" 粒子默认 / "ring" 线框 / 第三方注册键）。 */

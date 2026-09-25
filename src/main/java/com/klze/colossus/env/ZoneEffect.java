@@ -12,6 +12,11 @@ public interface ZoneEffect {
 
     void apply(ColossusBossEntity boss, ServerLevel level, TelegraphZone zone);
 
+    /** 空结算（{@link ZoneBurst} 只配了 freeze 或只配了 damage 时的另一半）。 */
+    static ZoneEffect nothing() {
+        return (boss, level, zone) -> { };
+    }
+
     /** 纯伤害（+可选从区心向外的击退）。 */
     static ZoneEffect damageOnly(float damage, float knockback) {
         return (boss, level, zone) -> {

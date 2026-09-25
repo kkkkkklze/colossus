@@ -163,7 +163,7 @@ public class ExampleColossus extends ColossusBossEntity {
                 .at(6, MoveTriggers.telegraph(
                         b -> com.klze.colossus.env.TelegraphZone
                                 .damageCircle(b, 5.0, 0, 4.0, 30, 0x66CCFF).withVisual("ring"),
-                        b -> com.klze.colossus.env.ZoneEffect.damageOnly(6.0f, 0.5f)))
+                        b -> new com.klze.colossus.env.ZoneBurst(6.0f, 0.5f, 0)))
                 .at(6, MoveTriggers.sound(SoundEvents.GENERIC_EXPLODE, 1.2f, 1.4f))
                 // 圈爆同时沿视线扫一道冰锥（HitSolver：线段扫掠，大位移不漏目标）
                 .at(37, MoveTriggers.sweepHit(8.0, 5.0f, 0.6f))

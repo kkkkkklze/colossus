@@ -296,3 +296,21 @@ protected void registerMoves(MoveSetBuilder m) {
 > 帧数/深度封顶、快照来源身份、id 用 tryParse、上限断言取等号）。
 > 验证：build + **57/57** + audit **10** + GameTest **All 10 passed**。
 > 未验：多人客户端下的动画表现（本机起不了真客户端），只能靠"客户端不再需要表"这个结构性结论兜住。
+
+> 进度（2026-09-24 第十六批·延迟工作可持久化）：✅ `workQueue` 从"存 Runnable + 按 tickCount 计数"改成
+> **`DeferredWork(绝对 gameTime, 种类 id, CompoundTag)`**——旧形态既写不进 NBT（闭包），
+> 又会在重载后把"还剩几 tick"当成"从 0 起第几 tick"（telegraph 要么凭空消失要么立刻结算）。
+> 配套把 telegraph 的结算数据化成 `env/ZoneBurst(damage,knockback,freezeTicks)` + `env/ZoneWork`
+> （KIND + encode/execute，区域存**出招时解算好的世界坐标**，不随 Boss 位移重算）；
+> JSON 侧的 `effect.kind` 词汇表**同一个形状**（单一事实源），DSL 的 `MoveTriggers.telegraph` 第二参改收 `ZoneBurst`。
+> 扩展点 `ColossusBossEntity.registerDeferredWork(kind, handler)`：处理器只准吃 NBT，
+> 查不到的种类 warn + 丢弃（mod 更新后不炸存档）。Runnable 版 API **直接删除**，不留第二条路。
+> 桩：自检 +4（zone/burst 过 NBT 不变样、merge 取每字段上限、缺 burst 段不抛）＝**61/61**；
+> GameTest +1 `deferredWorkSurvivesSaveAndStillSettles`（saveWithoutId → 另一实例 load → 队列还在 → 到点真的打伤圈内牛）＝**11 条**。
+> **本批抓出的两个真 bug 都是我自己上一批埋的**：护盾与延迟队列的落盘语句被嵌进
+> `if (!partDamage.isEmpty())` 里——**没有护壳分流账的 Boss 永远不持久化这两样**（护盾那条连轮 6 审查都没看见，
+> 因为示范 Boss 恰好总有分流账）。移出后 `colossus_works` 空列表也写，读侧才能区分"没待办"与"旧版本没存过"。
+> 另记一次工具性自伤：用 python `s.replace(切片, 新块)` 时切片取成空串，`replace('', x)` 会把新块插进**每个字符之间**，
+> `MoveCodec.java` 一度变成 47 万行——已按该文件最后一次提交恢复（无未提交工作丢失），坏文件留在 `/tmp/MoveCodec.corrupted.bak`。
+> 规矩：**改文件别用 index 切片 + 全局 replace，用精确 Edit**。
+> 边界：telegraph 的**客户端轮廓**不持久化（重载后圈子的伤害照落、轮廓消失），要一起恢复得让 ZoneSync 也进 NBT，记 v0.3。

@@ -137,19 +137,57 @@ public abstract class ColossusBossEntity extends Monster {
     @Nullable private MoveSet moveSet;
     @Nullable private ColossusBossEvent bossEvent;
 
-    /** 延迟工作队列（unusualend queueServerWork 模式）：telegraph 到期结算等都靠它。 */
-    private final java.util.Deque<ScheduledWork> workQueue = new java.util.ArrayDeque<>();
+    /**
+     * 延迟工作队列（unusualend queueServerWork 模式），第十六批起<b>可持久化</b>：
+     * 一条待办 = {@code (绝对 gameTime 到期, 工作种类, NBT 数据)}，所以能随实体存档、重载后继续到期。
+     * 旧形态存的是 {@code Runnable} 且按 {@code tickCount} 计数——既写不进 NBT，
+     * 重载后又把"还剩几 tick"当成"从 0 起第几 tick"，telegraph 要么凭空消失要么立刻结算。
+     */
+    private final java.util.Deque<DeferredWork> workQueue = new java.util.ArrayDeque<>();
 
-    private record ScheduledWork(int dueTick, Runnable action) {}
+    /** 一条待办；{@code kind} 必须能在 {@link #DEFERRED_WORKS} 里查到。 */
+    public record DeferredWork(long dueGameTime, String kind, CompoundTag data) {}
 
-    /** N tick 后在服务端 aiStep 里执行一次（实体先消失则不执行）。 */
-    public void scheduleWork(int delayTicks, Runnable action) {
-        this.workQueue.add(new ScheduledWork(this.tickCount + Math.max(1, delayTicks), action));
+    private static final Map<String, java.util.function.BiConsumer<ColossusBossEntity, CompoundTag>>
+            DEFERRED_WORKS = new java.util.HashMap<>();
+
+    static {
+        registerDeferredWork(com.klze.colossus.env.ZoneWork.KIND, com.klze.colossus.env.ZoneWork::execute);
+    }
+
+    /**
+     * 注册一种延迟工作（下游把"排到未来的事"挂进来；同一机制，不另开第二条路）。
+     * 处理器只能吃 NBT——凡不可序列化的闭包，就别指望它跨存档。
+     */
+    public static void registerDeferredWork(String kind,
+            java.util.function.BiConsumer<ColossusBossEntity, CompoundTag> handler) {
+        if (DEFERRED_WORKS.putIfAbsent(kind, handler) != null) {
+            throw new IllegalStateException("duplicate deferred work kind: " + kind);
+        }
+    }
+
+    /** N tick 后在服务端 aiStep 里执行一次（实体先消失则不执行）。kind 见 {@link #registerDeferredWork}。 */
+    public void scheduleWork(int delayTicks, String kind, CompoundTag data) {
+        this.workQueue.add(new DeferredWork(this.level().getGameTime() + Math.max(1, delayTicks), kind, data));
+    }
+
+    /** 在途待办数（诊断与回归桩用：证明"存进存档再读回来，队列没被清空"）。 */
+    public int pendingWorkCount() {
+        return this.workQueue.size();
     }
 
     private void drainWork() {
-        while (!this.workQueue.isEmpty() && this.workQueue.peekFirst().dueTick() <= this.tickCount) {
-            this.workQueue.pollFirst().action().run();
+        long now = this.level().getGameTime();
+        while (!this.workQueue.isEmpty() && this.workQueue.peekFirst().dueGameTime() <= now) {
+            DeferredWork w = this.workQueue.pollFirst();
+            var handler = DEFERRED_WORKS.get(w.kind());
+            if (handler == null) {
+                // 种类被删（mod 更新后）：丢弃并留痕，不炸存档
+                Colossus.LOGGER.warn("unknown deferred work kind {} on boss {} — dropped",
+                        w.kind(), this.getBossId());
+                continue;
+            }
+            handler.accept(this, w.data());
         }
     }
 
@@ -1129,8 +1167,19 @@ public abstract class ColossusBossEntity extends Monster {
             CompoundTag pd = new CompoundTag();
             this.partDamage.forEach((k, v) -> pd.putFloat("p" + k, v));
             tag.put("colossus_part_damage", pd); // 分流账也落盘——重载后击破进度不回滚（回归审查 P3#10）
-            tag.putFloat("colossus_shield", this.entityData.get(DATA_SHIELD)); // 护盾值同样落盘（重载不清零）
         }
+        // 护盾与延迟队列**不能**嵌在上面那个 if 里：没有分流账的 Boss（不用护壳弱点）
+        // 就会永远不持久化这两样——第十六批的持久化桩正是这么抓出来的。
+        tag.putFloat("colossus_shield", this.entityData.get(DATA_SHIELD));
+        net.minecraft.nbt.ListTag works = new net.minecraft.nbt.ListTag();
+        for (DeferredWork w : this.workQueue) {
+            CompoundTag one = new CompoundTag();
+            one.putLong("due", w.dueGameTime());
+            one.putString("kind", w.kind());
+            one.put("data", w.data());
+            works.add(one);
+        }
+        tag.put("colossus_works", works); // 空列表也写：读侧据此区分"没待办"与"这版本没存过"
         if (this.getMaxHealth() > 0) {
             tag.putFloat("colossus_hp_ratio", this.getHealth() / this.getMaxHealth());
         }
@@ -1190,6 +1239,16 @@ public abstract class ColossusBossEntity extends Monster {
         if (tag.contains("colossus_squad", net.minecraft.nbt.Tag.TAG_COMPOUND)
                 && !this.level().isClientSide) {
             this.squad().load(tag.getCompound("colossus_squad"));
+        }
+        if (tag.contains("colossus_works", net.minecraft.nbt.Tag.TAG_LIST)
+                && !this.level().isClientSide) {
+            this.workQueue.clear();
+            for (var t : tag.getList("colossus_works", net.minecraft.nbt.Tag.TAG_COMPOUND)) {
+                if (!(t instanceof CompoundTag one)) continue;
+                long due = one.getLong("due");
+                if (due <= 0L || one.getString("kind").isEmpty()) continue; // 残缺条目：丢掉，别在 tick 里炸
+                this.workQueue.add(new DeferredWork(due, one.getString("kind"), one.getCompound("data")));
+            }
         }
         if (tag.contains("colossus_shield", net.minecraft.nbt.Tag.TAG_FLOAT)
                 && !this.level().isClientSide) {

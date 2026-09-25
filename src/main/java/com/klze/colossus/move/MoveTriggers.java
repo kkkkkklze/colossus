@@ -88,17 +88,14 @@ public final class MoveTriggers {
      */
     public static MoveTrigger telegraph(
             java.util.function.Function<ColossusBossEntity, com.klze.colossus.env.TelegraphZone> zoneFn,
-            java.util.function.Function<ColossusBossEntity, com.klze.colossus.env.ZoneEffect> effectFn) {
+            java.util.function.Function<ColossusBossEntity, com.klze.colossus.env.ZoneBurst> burstFn) {
         return (boss, tick) -> {
             var zone = zoneFn.apply(boss);
-            var effect = effectFn.apply(boss);
+            var burst = burstFn.apply(boss);
             zone.broadcast(boss);
-            boss.scheduleWork(zone.warnTicks() + 1, () -> {
-                if (boss.level() instanceof net.minecraft.server.level.ServerLevel level
-                        && boss.isAlive()) {
-                    effect.apply(boss, level, zone);
-                }
-            });
+            // 排的是数据不是闭包：warn 期间即使区块卸载/Boss 被重载，这一发照样会结算
+            boss.scheduleWork(zone.warnTicks() + 1, com.klze.colossus.env.ZoneWork.KIND,
+                    com.klze.colossus.env.ZoneWork.encode(zone, burst));
         };
     }
 
@@ -107,7 +104,7 @@ public final class MoveTriggers {
                                               float damage, float knockback, int colorRGB) {
         return telegraph(
                 b -> com.klze.colossus.env.TelegraphZone.damageCircle(b, forward, 0, radius, warnTicks, colorRGB),
-                b -> com.klze.colossus.env.ZoneEffect.damageOnly(damage, knockback));
+                b -> new com.klze.colossus.env.ZoneBurst(damage, knockback, 0));
     }
 
     /**

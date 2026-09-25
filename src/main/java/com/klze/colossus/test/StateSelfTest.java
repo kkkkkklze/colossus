@@ -40,6 +40,7 @@ public final class StateSelfTest {
         testDirtyMeter();
         testProgressLedger();
         MoveJsonSelfTest.run((name, ok) -> check(name, ok));
+        testDeferredWorkData();
         if (failures > 0) {
             System.out.println("SELFTEST FAILED: " + failures + "/" + checks);
             System.exit(1);
@@ -305,6 +306,35 @@ public final class StateSelfTest {
         check("dirty check: same revision sends nothing, changed sends once",
                 !com.klze.colossus.progress.ProgressLedger.shouldSend(9L, 9L)
                         && com.klze.colossus.progress.ProgressLedger.shouldSend(-1L, 9L));
+    }
+
+    /** 延迟工作的数据形态（第十六批）：区域与爆发都必须能过 NBT 一遭不变样。 */
+    private static void testDeferredWorkData() {
+        var zone = new com.klze.colossus.env.TelegraphZone(10.5, 3.0, -4.25,
+                6.5, 1.0, 30, 0xFF4040, "ring");
+        var back = com.klze.colossus.env.TelegraphZone.fromTag(zone.toTag());
+        check("zone tag round-trips geometry and visual",
+                Math.abs(back.cx() - 10.5) < 1e-9 && Math.abs(back.cy() - 3.0) < 1e-9
+                        && Math.abs(back.cz() + 4.25) < 1e-9 && Math.abs(back.radiusXZ() - 6.5) < 1e-9
+                        && Math.abs(back.radiusY() - 1.0) < 1e-9 && "ring".equals(back.visual()));
+
+        var burst = new com.klze.colossus.env.ZoneBurst(6.0f, 0.5f, 40)
+                .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.0f, 0));
+        var bb = com.klze.colossus.env.ZoneBurst.fromTag(burst.toTag());
+        check("burst tag round-trips damage/knockback/freeze",
+                Math.abs(bb.damage() - 6.0f) < 1e-6 && Math.abs(bb.knockback() - 0.5f) < 1e-6
+                        && bb.freezeTicks() == 40);
+        check("merge takes the per-field max (damage+freeze compose, nothing cancels)",
+                new com.klze.colossus.env.ZoneBurst(3.0f, 0.0f, 0)
+                        .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.9f, 20)).damage() == 3.0f
+                        && new com.klze.colossus.env.ZoneBurst(3.0f, 0.0f, 0)
+                        .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.9f, 20)).freezeTicks() == 20);
+
+        // 残缺条目（没 burst 段）不能让读档炸——ZoneWork.execute 里是 warn + return
+        var broken = new net.minecraft.nbt.CompoundTag();
+        broken.put("zone", zone.toTag());
+        check("burst 段缺失时 encode/decode 不抛（execute 侧留痕丢弃）",
+                com.klze.colossus.env.ZoneBurst.fromTag(broken.getCompound("burst")).empty());
     }
 
     private static void testDirtyMeter() {
