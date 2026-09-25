@@ -37,6 +37,19 @@ public record TelegraphZone(double cx, double cy, double cz,
         return Math.max(1, this.warnTicks) + FADE_TICKS;
     }
 
+    /**
+     * 这一发的<b>结算延迟</b>（相对出招那一 tick）：排待办与重载剪枝共用这一个式子。
+     *
+     * <p>为什么单独成方法（轮 14 P3-6）：这两处原先各写一遍——{@code warnTicks + 1}（MoveTriggers）与
+     * {@code Math.max(1, warnTicks) + 1}（实体读档剪枝），{@code warnTicks <= -1} 时两者差 1 tick，
+     * "待办被判过期丢掉、轮廓按另一条式子还活着"那一档就从负数输入里爬回来了。
+     * 一条规则两份实现，正是本仓反复在消灭的东西；JSON 侧另有 {@code warn >= 0} 的拒，
+     * 但 DSL 那边不经过 codec，所以两条路都必须指向这里。
+     */
+    public int settleDelayTicks() {
+        return Math.max(1, this.warnTicks + 1);
+    }
+
     public AABB box() {
         return new AABB(cx - radiusXZ, cy - radiusY, cz - radiusXZ,
                 cx + radiusXZ, cy + radiusY, cz + radiusXZ);

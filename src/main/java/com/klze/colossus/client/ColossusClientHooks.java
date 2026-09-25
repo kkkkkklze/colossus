@@ -64,8 +64,10 @@ public final class ColossusClientHooks {
      */
     @SubscribeEvent
     public static void onEntityJoin(net.minecraftforge.event.entity.EntityJoinLevelEvent event) {
-        if (event.getLevel().isClientSide()
-                && event.getEntity() instanceof com.klze.colossus.entity.ColossusBossEntity boss) {
+        // 先判取消（轮 14 P3-7）：ClientLevel:336 是**先 post 再 entityStorage.addEntity**，
+        // 第三方取消这条事件时实体根本没进图，却已被我们 watch ⇒ 它的投影会读成"看得见的圈"
+        if (event.isCanceled() || !event.getLevel().isClientSide()) return;
+        if (event.getEntity() instanceof com.klze.colossus.entity.ColossusBossEntity boss) {
             TelegraphClient.watch(boss);
         }
     }

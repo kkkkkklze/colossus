@@ -114,6 +114,10 @@ public final class TelegraphClient {
 
     /** 实体进客户端世界时登记（{@code EntityJoinLevelEvent}，只在 {@code Dist.CLIENT} 侧调用）。 */
     public static void watch(ColossusBossEntity boss) {
+        // 每次登记都强制"下一次读取一定全量读"：memo 住在实体上、比这条名单长寿，
+        // 若外部（HUD addon / 第三方渲染层）调过 public 的 clear()，不重置就会在重新 watch 之后
+        // 仍判"没变"⇒ 在途轮廓永久回不来（轮 15 P2-3）
+        boss.forgetTelegraphMemo();
         WATCHED.put(boss.getId(), new Watched(boss));
     }
 
@@ -124,14 +128,22 @@ public final class TelegraphClient {
     }
 
     /**
-     * 每客户端 tick：①世界换了就整表清（不依赖 GC，也不依赖离场事件）；②接同步数据的<b>实例变化</b>；
+     * 每客户端 tick：①世界换了就把<b>轮廓</b>整批作废（名单保留，见下）；②接同步数据的<b>实例变化</b>；
      * ③按绝对时刻推进寿命与撒粒子。
      */
     static void tick() {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level != lastLevel) {
-            clear(); // 旧维度的 Boss 与圈一起作废：它们在新维度里不存在，画出来就是同坐标的幽灵圈
+            // <b>只作废轮廓，不能连 WATCHED 一起清</b>（轮 15 P1-2）：换等级与"Boss 进客户端世界"
+            // 会落在<b>同一个客户端 tick</b>里——服务端在传送那一 tick 就把配对包与投影一起排上同一条
+            // 连接（ServerPlayer:758 addDuringPortalTeleport 早于 :765 sendLevelInfo；
+            // ChunkMap:1392 → ServerEntity:234-239），客户端则在这一帧的 runAllTasks() 里一次性排空
+            // （Minecraft:1106），而本方法是更晚的 ClientTick END（:1875）⇒ 先 watch 后 clear
+            // 就把刚登记好的 Boss 永久抹掉（实体一生只发一次 join 事件，之后再没机会）。
+            // 旧维度的条目交给下面那条 boss.level() != mc.level 判据自己剔，不需要这里清名单。
             lastLevel = mc.level;
+            if (!ZONES.isEmpty()) version++;
+            ZONES.clear();
         }
         if (mc.level == null) return;
         long now = mc.level.getGameTime();
@@ -150,7 +162,10 @@ public final class TelegraphClient {
             dropOwner(boss.getId());
             for (ColossusBossEntity.TelegraphView v : views) {
                 if (v.endGameTime() <= now) continue; // 补包路上晚了几 tick：过期的一律不补画
-                ZONES.put(key(boss.getId(), v.id()), new Live(boss.getId(), v));
+                // 新增也必须 bump version（轮 15 P1-1）：判据有三态（增/删/清），上一批只记了删与清，
+                // 于是"只增不删"的那一批发出去后 RENDER_SNAPSHOT 永不重建 ⇒ 注册样式（含内置 ring）
+                // 一个像素都不画，而 tick() 又因为 hasStyle 为真而<b>不撒粒子</b> ⇒ 整发危险区完全隐形。
+                if (ZONES.put(key(boss.getId(), v.id()), new Live(boss.getId(), v)) == null) version++;
             }
         }
 
@@ -158,6 +173,10 @@ public final class TelegraphClient {
         while (zones.hasNext()) {
             Live z = zones.next().getValue();
             if (z.endGameTime <= now) { zones.remove(); version++; continue; }
+            // 时钟还没对齐就<b>不画</b>（轮 14 P3-1 的收口方向）：新 ClientLevel 的 gameTime 起点是 0
+            // （ClientLevelData 构造器不设该字段），只有当 respawn 与 SetTime 被 netty 拆到不同批时
+            // 才会出现"本地钟远小于 start"。这种帧画出来是一只 0% 的假圈，宁可空一帧。
+            if (now < z.startGameTime - (z.endGameTime - z.startGameTime)) continue;
             if (!hasStyle(z.visual)) spawnOutlineParticles(mc, z); // 几何档接管时不双份表现
         }
     }
@@ -176,6 +195,7 @@ public final class TelegraphClient {
         if (!ZONES.isEmpty()) version++;
         ZONES.clear();
         WATCHED.clear();
+        lastLevel = null; // 这是一张 static 强引用：不复位就把整张旧 ClientLevel（连同 entityStorage/chunkSource）扣住
     }
 
     /** 在途轮廓条数（诊断用）。 */
@@ -200,6 +220,7 @@ public final class TelegraphClient {
                 Live z = RENDER_SNAPSHOT.get(i);
                 ZoneRenderer r = STYLES.get(z.visual);
                 if (r == null) continue;
+                if (nowGameTime < z.startGameTime - (z.endGameTime - z.startGameTime)) continue; // 同 tick()：钟没对上就不画
                 double x = z.center.x - camPos.x, y = z.center.y - camPos.y, zz = z.center.z - camPos.z;
                 double pad = z.radiusXZ + 0.5;
                 double vpad = Math.max(1.0, z.radiusY + 0.5);
@@ -219,12 +240,28 @@ public final class TelegraphClient {
         }
     }
 
+    /**
+     * 粒子档的成本上限：距离平方（64 格）与每圈点数（96）。
+     *
+     * <p>为什么必须自己节流（轮 14 P2-2）：{@code force=true} 买到"不被距离裁剪"的同时，
+     * 也把 vanilla 那两个<b>事实上的总量闸</b>（{@code LevelRenderer:2511} 的 32 格、
+     * {@code :2514} 的 MINIMAL 整批丢）一起短路掉了；而 vanilla 后面没有兜底——
+     * {@code ParticleEngine#add(:326-337)} 只对 {@code getParticleGroup()} 非空的粒子查容量
+     * （{@code Particle.java:226} 默认返回 {@code Optional.empty()}，END_ROD/DUST 都不在任何 group 里），
+     * 而本版本 {@code ParticleEngine:74 MAX_PARTICLES_PER_LAYER = 16384} 声明后<b>没有任何地方用它</b>。
+     * 一圈 = {@code 2πr·1.5} 个点：r=30 就是 282 个/圈/ tick，八个圈同放足以把帧率打穿。
+     * "修对了可见性"不等于"没引入新的代价"，所以这两道闸放在框架侧。
+     */
+    private static final double PARTICLE_CULL_DIST_SQ = 64.0D * 64.0D;
+    private static final int MAX_POINTS_PER_OUTLINE = 96;
+
     /** 粒子档：沿轮廓撒一圈。 */
     private static void spawnOutlineParticles(Minecraft mc, Live z) {
+        if (mc.player != null && mc.player.distanceToSqr(z.center) > PARTICLE_CULL_DIST_SQ) return;
         RandomSource r = mc.level.getRandom();
         ParticleOptions p = z.cachedParticle != null ? z.cachedParticle : (z.cachedParticle = particleFor(z));
         double circumference = 2 * Math.PI * z.radiusXZ;
-        int points = Math.max(8, (int) (circumference * 1.5));
+        int points = Math.min(MAX_POINTS_PER_OUTLINE, Math.max(8, (int) (circumference * 1.5)));
         for (int k = 0; k < points; k++) {
             double angle = (k + r.nextDouble() * 0.5) / points * Math.PI * 2;
             // 必须是**带 boolean 的那个重载**（轮 14 P1-1，我上一批修的其实是半条）：

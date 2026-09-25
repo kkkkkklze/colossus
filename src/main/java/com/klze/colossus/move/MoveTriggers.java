@@ -108,7 +108,7 @@ public final class MoveTriggers {
             int view = boss.showTelegraph(zone, zone.lifetimeTicks());
             if (view < 0) return;
             // 排的是数据不是闭包：warn 期间即使区块卸载/Boss 被重载，这一发照样会结算
-            if (!boss.scheduleWork(zone.warnTicks() + 1, com.klze.colossus.env.ZoneWork.KIND,
+            if (!boss.scheduleWork(zone.settleDelayTicks(), com.klze.colossus.env.ZoneWork.KIND,
                     com.klze.colossus.env.ZoneWork.encode(zone, burst))) {
                 boss.hideTelegraph(view);
             }

@@ -644,3 +644,50 @@ protected void registerMoves(MoveSetBuilder m) {
 > 验证：build（`-Pgecko`）+ 自检 **100/100**（本轮**没有**新增自检条数：P2-5 是替换退化判据、
 > P3 那几条改的是拒因形态，不为此注水计数）+ audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。仍未验：客户端画面本身。
+
+> 进度（2026-09-25 第二十六批·审查轮 15 处置：**上一批我自己的两个处置各造了比原问题更大的失效面**）：
+> ⚠⚠ **两条 P1 都是自伤，且四道门一条都抓不到**。①"复用快照 + 版本号"只 bump 了**删与清**、
+> 漏了**增** ⇒ `RENDER_SNAPSHOT` 在"只增不删"那一批后永不重建，而 `tick()` 因 `hasStyle` 为真
+> 主动不撒粒子 ⇒ 注册样式（含内置 `ring`，示范 Boss 两条 telegraph 都在用）**一个像素都不画**，
+> 整发危险区完全隐形；②新加的"等级实例一变就 `clear()`"把 `WATCHED` 一起清了，而换维度与
+> `EntityJoinLevelEvent` 落在**同一个客户端 tick**（服务端 `ServerPlayer:758 addDuringPortalTeleport`
+> 早于 `:765 sendLevelInfo`，`ChunkMap:1392 → ServerEntity:234-239`；客户端 `Minecraft:1106 runAllTasks()`
+> 一次排空、`TelegraphClient.tick()` 在更晚的 `:1875`）⇒ 刚登记的 Boss 被永久抹掉，
+> 而实体一生只发一次 join 事件。修法是**把判据的三态列全**：增/删/清都要 bump；
+> 换维度只作废轮廓、名单交给 `boss.level() != mc.level` 那条已有判据自己剔。
+> ⚠ **`renderZones` 只在 `RenderLevelStageEvent` 里被调 ⇒ 无头门永不触发**：这条客户端路径的回归
+> 只能靠代码路径审 + 真机复验，"门全绿"对它不构成证据（写进口径）。
+> ✅ 三条连带修正：`clear()` 复位 static `lastLevel`（**文档上一批写着"也清 lastLevel"，代码里没有**
+> ——宣称做过的事要当场回读确认）；`force=true` 把 vanilla 两道事实总量闸（32 格、MINIMAL）一起短路后
+> 框架自己补两道闸（64 格粗筛 + 每圈 96 点上限，因为 `ParticleEngine#add` 只对有 particle group 的粒子
+> 查容量，END_ROD/DUST 都不在任何 group，而 `MAX_PARTICLES_PER_LAYER` 在 1.20.1 **声明后无人使用**）；
+> `takeTelegraphViewsIfChanged()` 的 memo 从 `Watched` 搬进实体时丢了复位 ⇒ 新增
+> `forgetTelegraphMemo()` 并在 `watch()` 里调用（搬判据时顺手搬走别人的复位点，也是自伤的一种）。
+> ✅ 四处钳位与式子统一：`HARD_MAX_TELEGRAPHS = 32` + 私有 `telegraphCap()`（钳开在**用点**，
+> 放钩子里会被覆写绕过）；新增 `TelegraphZone#settleDelayTicks()` 让"排待办"与"重载剪枝"共用同一个式子
+> （原先两处不同形，`warn <= -1` 时差 1 tick，"圈亮着但那发永不落"从负数输入爬回来了）+ JSON 侧拒负 warn；
+> 拒因 warn 累计条数进正文、`flush` 时复位桶；`onEntityJoin` 判 `isCanceled()`。
+> ✅ **收回我自己写进文档的两条假事实**：①"换维度后 ≤20 tick 进度按 0"——`ClientboundSetTimePacket`
+> 在进/换维那一 tick 就发（`PlayerList:672 sendLevelInfo` ← `ServerPlayer:765/:1454`），正常路径第一帧就是对的；
+> 真实风险是新 `ClientLevel` 的 `gameTime` 起点为 0（`ClientLevelData` 构造器不设该字段），只在被 netty
+> 拆批时有 ≤1 tick 错位 ⇒ 代码改成"钟没对上就**不画**"（`now < start - span`）而不是承认画 0%；
+> ②"几百条 view 就顶到 2 MiB"——按 11 个键 ≈140 B/条，2 MiB 约 **1.5 万条**，
+> 32 条约 4.5 KiB 才是合理量级（防御照做，数字不能留给下一轮抄错）。
+> ✅ **v12 两份取证已抽核并落盘**（v12a 40.7 KB / v12b 47.6 KB，都在研究库 `分析报告/_分析报告/`）。
+> 我复核时**发现自己那份 v12a 里有两条错误的"全称判断"**并就地改正：
+> "帧准的动画接续全库零样本"是**假的**——`FDLib AttackChain.java:249-260/228-247` 落的是
+> `(招名, 招内相对 tick, stage)` + 后续招队列、读回直接 `instance.tick = tick` ⇒ 从断掉那一帧继续；
+> `[首领崛起] AbstractBossEntity.java:182-214` 更把 `AttackPhase`/`AttackAnimtime`/`State`/`Timer`
+> 整套在 entityData 与 NBT 之间**双向镜像**。另有一条我完全漏掉的 1.20.1 现成通道：
+> `IEntityAdditionalSpawnData`（47.4.23 sources 里接口存在，`PlayMessages.java:109-113` 写 / `:169-171` 读）
+> ⇒ "新追踪者一进来就知道当前招与帧位"不需要把帧号常驻 entityData 逐 tick 发包。
+> **纪律**：全称判断要么写成"我在 X 范围内扫到 0 例"，要么把范围扫完再说（这次是"我扫到 0"被写成"全库 0"）。
+> 取证给出的下一步形态（**已按先例改过方向**）：帧位用**招内相对 tick + fired 位图**、作废判定用
+> **绝对 `getGameTime()`**、两者并存各管一件事——原先我写的"绝对起算点"与**全部**先例相反，
+> 绝对起算点会把"卸载 10 秒"变成"这一招早就该结束"，而玩家预期是"Boss 从断掉的地方继续放完"。
+> 未做（记 §3）：状态栈快照（下一批）；`DATA_DEATH_TICK` 仍不落盘；跨区块轮廓要 chunk 级叠加层；
+> 跨招关系词汇表（v12b 给出三件最小原语：位图旗标 / 带 TTL 计数器 / CD 共享组 + 全局乘子，
+> 且"招与招的关系用数据表达"在全库 JSON 层 **0 例**＝补空缺）；许可证仍 ARR。
+> 验证：build（`-Pgecko`）+ 自检 **100/100**（本轮无新增条数，改的是渲染/日志/钳位形态）+ audit **14**
+> + `runGameTestServer` **All 14 required tests passed**（两轮）。仍未验：客户端画面（含本轮两条 P1 的复现，
+> 它们是纯代码路径结论）。

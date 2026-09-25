@@ -143,6 +143,9 @@ public final class MoveCodec {
 
         ZONE_KINDS.put("circle_ahead", (el, field) -> {
             CircleAhead d = decodeRecord(el, CircleAhead.CODEC, field);
+            if (d.warn() < 0) { // 负 warn 会让 lifetimeTicks()/settleDelayTicks() 的两道 max(1,…) 各说一半（轮 14 P3-6）
+                throw new MoveDataException(field + ".warn", "预警窗口不能是负数：" + d.warn());
+            }
             return boss -> {
                 TelegraphZone z = TelegraphZone.damageCircle(boss, d.forward(), d.side(),
                         d.radius(), d.warn(), d.color());
