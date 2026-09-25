@@ -56,9 +56,12 @@ public final class MoveSet {
         List<Integer> weights = new ArrayList<>();
         long total = 0; // long 累加：两个大权重 int 相加会溢出成负数炸 nextInt（审查 P2#10）
         for (MoveDef m : moves) {
-            if (!m.available(ctx)) continue;
+            // 每个候选换成带 candidate 的那一份——not_recent / recent_band 都要知道"正在评价谁"。
+            // withCandidate 同实例时返回 this，所以全表候选不会新增对象（ctx 只有一个真正在变的字段）
+            AttackContext ctxM = ctx.withCandidate(m);
+            if (!m.available(ctxM)) continue;
             if (cooldownLeft.applyAsInt(m.id()) > 0) continue;
-            int w = m.weight(ctx);
+            int w = m.weight(ctxM);
             if (w <= 0) continue;
             pool.add(m);
             weights.add(w);

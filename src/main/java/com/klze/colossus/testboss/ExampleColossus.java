@@ -126,10 +126,13 @@ public class ExampleColossus extends ColossusBossEntity {
                 .at(26, MoveTriggers.breakAhead(2.5, 3.0, 1.6, false)) // 砸地碎裂带（受 mobGriefing 门控）
                 .done();
 
-        // 横扫：贴身高权重（ctx 自适应选招）
+        // 横扫：贴身高权重（ctx 自适应选招）；第二十批再加一层" anti-repeat"——
+        // 最近 3 次出招里放过横扫，这次就不许再放（连续横扫是这套招最容易被打背板的一招）。
+        // DSL 侧走 ctx.usedRecently(3)，JSON 侧走 requires.not_recent / weight.recent_band，同一份历史两种用法。
         m.move("sweep")
                 .duration(24).cooldown(40).range(4.5f)
                 .weight(ctx -> ctx.distSq() < 9 ? 5 : 1)
+                .requires(ctx -> !ctx.usedRecently(3))
                 .anim("attack_sweep")
                 .at(14, MoveTriggers.arcHit(4.5f, 160f, 6.0f, 0.9f))
                 .done();

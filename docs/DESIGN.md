@@ -72,13 +72,14 @@ protected void registerMoves(MoveSetBuilder m) {
      .phase(0, 2)                                  // 阶段门 [min,max)
      .range(6.0f)                                  // 目标距离门（≤ 才可选）
      .weight(ctx -> ctx.distSq() < 25 ? 3 : 1)     // 上下文权重
+     .requires(ctx -> !ctx.usedRecently(3))        // 准入谓词：候选招式看得见自己最近用过没有（第二十批）
      .anim("attack_smash")                         // 客户端动画名（字符串协议）
      .at(10, MoveTriggers.sound("entity.generic.explode"))
      .at(24, MoveTriggers.arcHit(6.5f, 90, 7.0f, 0.4f))   // 判定帧：扇形 AOE
      .at(24, MoveTriggers.event("smash_ring"));            // 客户端特效事件
 }
 ```
-调度：`IdleState.onTick` → 有目标 → `MoveSelector.pick(ctx)`（过滤阶段/冷却/距离 → 加权随机）→ `AttackState`。AttackState 每 tick 比对 `self.tick()` 触发帧表，**服务端单帧结算**，结束回 idle。冷却表挂在实体（`Map<String,Integer>`），随阶段可由 `MoveSelector` 修饰。
+调度：空闲态 → 有目标 → `MoveSet.pick(ctx, cooldownLeft, random)`（过滤阶段/距离/准入 → 扣冷却 → 加权随机）→ `AttackState`。AttackState 每 tick 比对 `self.tick()` 触发帧表，**服务端单帧结算**，结束回 idle。冷却表挂在实体（`Map<ResourceLocation,Integer>`，写入值＝`cooldown+duration`），随阶段可由权重函数修饰。JSON 侧同一词汇表：`requires` 认 `phase_in`/`target_within`/`target_beyond`/`not_recent`，`weight` 认 `base`/`distance_band`/`recent_band`，条目封顶 16 条。
 
 ### 2.3 生命周期（基类固化）
 - **接敌**：`startSeenByPlayer` → bar 可见；`EngagementTracker` hurt 收集，10 分钟 TTL 剔除死亡/超距。
@@ -380,11 +381,20 @@ protected void registerMoves(MoveSetBuilder m) {
 > ② 清单 **58b** 明写 `ShieldHudElement.java` 的源是 **DE**〔NeoForge 1.21.1〕；
 > ③ 清单 **#57** 是"护盾/多资源条"（源 DE `ShieldedServerBossInfo.java:22-84`），
 > **`not_recent` 不是清单条目**——它只是我自己待办里的字段名，不许它冒充语料结论；
-> ④ 1.20.1 `GuiGraphics` 确有 6 个 `create(...)` 重载（`SpriteGetter`/`int,int`/`ResourceLocation`/
-> `ItemStack`/`Entity`/`RenderState`，行 510-533）⇒ 血条自绘纹理可走 vanilla API，不必等 mod 先例。
-> 下一批：v10 重派（提示词里交出语料真实布局，要求贴 `ls`/`find` 存在性证据；验收只认磁盘上回读到的文件）、
-> `requires`/`weight` 词汇表扩展（先拿到真实依据，再决定把上限从 16 收到多少）、预警轮廓入 NBT、
-> `not_recent`/连招链的状态存法、GL addon 运行期复验、许可证裁定。
+> ~~④ 1.20.1 `GuiGraphics` 确有 6 个 `create(...)` 重载（行 510-533）~~
+> **④′（v10 重派后由我亲自回读源码推翻并重写）**：1.20.1 `GuiGraphics` **没有任何 `create(...)` 重载**——
+> 全文件里 `create` 只出现在 `:589/:593` 的 `ClientTooltipComponent::create`，`blitSprite` 出现 **0 次**，
+> `:510-516` 实际是 `renderItemDecorations`。血条自绘纹理的正解是直接 `blit`：
+> `blit(ResourceLocation, x, y, u, v, w, h)`（`:333` 起）/ `blit(int...,TextureAtlasSprite)`（`:318`）/
+> `blitNineSliced`（`:381`）。**我原先把这条当成"自己核过的事实"写进了三处文档，而那次根本没有跑过命令——**
+> 复发的正是同一类错误：**写"我核过"必须能指到当轮的工具输出，否则不许那样写**。
+> 下一批输入改判为 v10 已落盘报告（见 §7 第二十批条），重点四条：Cataclysm 的 Forge 1.20.1 本体藏在
+> `lender544__new1.20.1`（`gradle.properties: 1.20.1 / forge 47.3.22 / mod_id=cataclysm`，我已核），
+> `Entity.saveWithoutId` **不落 `tickCount`**（vanilla 靠 `AreaEffectCloud:334/377` 自己写 `"Age"`——
+> 这条正面印证了框架用绝对 `gameTime` 而不是 tick 计数），中途入场补状态走 `ServerBossEvent#addPlayer`
+> 快照（`CMBossInfoServer:41-44` 与 DE `ShieldedServerBossInfo:71-76` 同构，框架已有同形实现），
+> 多条堆叠的增量语义取 AlexsCaves 的 `event.setIncrement(event.getIncrement() + 7)`
+> （`ClientEvents.java:698-718`，读-改-加；Cataclysm 那种覆盖写法叠多条会互相压掉）。
 
 > 进度（2026-09-25 第十九批·审查轮 9 处置）：✅ **抬血规则收成一个覆写点**——`ColossusBossEntity.setHealth`
 > 在 `deathResolved && hp<=0` 时拒绝任何抬血，同时**删掉**轮 8 加在 `applyScaling` 的那道重复判据
@@ -408,3 +418,30 @@ protected void registerMoves(MoveSetBuilder m) {
 > 客户端**没有死亡动画**（站着消失）。修前是 1 血雕像，所以不算回归，但这条要真做就得让 ZoneSync
 > 那类"重载补状态"的通道把死亡帧也带上，与预警轮廓入 NBT 记同一笔账（§3）。
 > 验证：build（`-Pgecko`）+ 自检 **69/69** + audit **12** + GameTest **All 12 passed**（连跑三轮稳定）。
+
+> 进度（2026-09-25 第二十批·not_recent 招式历史，v10 的第一批落地）：✅ v10 重派已落盘并被我抽查过
+> （`Mod源码研究汇总/分析报告/_分析报告/深挖__BOSS引擎调研v10__…取证.md`，63180 字节 / 540 行，
+> 五节齐；引行号用 python 按行号取回读通过，`sed` 直接取那次失败是该 shell 的 CJK 行尾问题、不是报告错）。
+> Q3 的结论是这一批的依据：**577 仓里"最近用过的招要禁用/降权"零实现**（库内只有一招一个冷却标量），
+> 所以这格是框架自己补的，不是照抄。
+> 落地形态遵守"新维度做成数据而不是新子类"：`ColossusBossEntity` 长一条 **8 格×8 位的环形历史**
+> （`recentMoveHashes`，`beginAttack` 记账，`colossus_recent_moves` 无条件入档，0 留给空槽——
+> 否则 path hash 恰好为 0 的招一出生就被当成"刚用过"，`not_recent` 永久锁死那一招，1/256 的隐形炸弹），
+> 存 hash 不存字符串 ⇒ 误判率 1/128，方向上只会"多禁用一次"，不会放行不该放行的招。
+> 另一半 prerequisite 是**选招函数原先看不见候选招式**：`MoveSet.pick` 只建一次 ctx 就给全表复用，
+> `not_recent` 没法表达"我自己最近用过"。给 `AttackContext` 加 `candidate` 分量 + `withCandidate`
+> （record 不可变，同实例返回 `this` 所以零额外分配），`usedRecently(n)` 在无实体/无候选时返回 false
+> ⇒ 纯逻辑自检里构造的 ctx 不会被历史锁死。
+> 词汇表两侧都长出来并**各自真的被用上**（示范 Boss 的 `sweep` 走 DSL `ctx.usedRecently(3)`，
+> demo JSON 的 `datapack_quake` 走 `weight.recent_band`）：`requires.not_recent` ＝近 N 次用过就整条不许选，
+> `weight.recent_band{window,add}` ＝用过就降权仍可被选中——前者防背板、后者保权重连续，两种语义都留。
+> 窗口越界（0 或 >8）**字段级拒**而不是静默截断：截成 8 会让作者以为"最近 20 次"生效了，
+> 那是会让招式表行为说谎的那类错。
+> v10 的 Q2 顺手正面印证了框架既有选择：**1.20.1 `Entity.saveWithoutId` 不落 `tickCount`**
+> （vanilla 靠 `AreaEffectCloud:334/377` 自己写 `"Age"` 回补），而 `DeferredWork` 用的就是绝对 `gameTime`，
+> 所以"重载后把剩余倒计时当成已过期"那类事故在本框架不成立。
+> 遗留：环形历史只有 8 格，**跨 8 次以上"不重复"的约束做不到**（要更长得开 ListTag，成本另计）；
+> `weight.recent_band` 只能看候选自己，跨招互斥（"刚放过 A 就别放 B"）还没词汇；
+> 预警轮廓入 NBT、GL addon 运行期复验、`GuiGraphics` 自绘纹理消费端、许可证裁定仍在账上。
+> 验证：build（`-Pgecko`）+ 自检 **71/71**（+2：无历史时降权为 0、窗口越界字段级拒）+ audit **13** +
+> GameTest **All 13 passed**（新桩 `move-history` 证"出招进历史 + 历史过 NBT"，另跑两轮稳定）。

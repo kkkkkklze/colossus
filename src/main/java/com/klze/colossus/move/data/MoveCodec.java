@@ -159,6 +159,15 @@ public final class MoveCodec {
             double dist = requireFloat(value, "requires.target_beyond");
             return ctx -> ctx.distSq() > dist * dist;
         });
+        // 第二十批·招式历史。v10 扫遍 577 仓，"最近用过的招要禁用/降权"这一格是**零实现**
+        // （库内只有一招一个冷却标量），所以这不是照抄而是补空缺：
+        //   {"requires":[{"not_recent":4}]}          —— 近 4 次用过就整条不许选
+        //   {"weight":[…,{"kind":"recent_band","window":4,"add":-6}]} —— 用过就降权，仍可被选中
+        // 前者防重复感、后者保权重连续，两种语义各有用处，别只留一种。
+        CONDITION_KEYS.put("not_recent", value -> {
+            int window = recentWindow(value, "requires.not_recent");
+            return ctx -> !ctx.usedRecently(window);
+        });
 
         WEIGHT_KEYS.put("base", el -> {
             int base = (int) requireFloat(el.get("base"), "weight.base"); // 取成员值，不是整行对象
@@ -171,6 +180,24 @@ public final class MoveCodec {
                 return dist >= d.min() && dist <= d.max() ? d.add() : 0;
             };
         });
+        WEIGHT_KEYS.put("recent_band", el -> {
+            int window = recentWindow(el.get("window"), "weight.recent_band.window");
+            int add = (int) requireFloat(el.get("add"), "weight.recent_band.add"); // 通常是负数＝降权
+            return ctx -> ctx.usedRecently(window) ? add : 0;
+        });
+    }
+
+    /**
+     * 招式历史窗口取值。越界一律字段级拒，不做静默截断——
+     * 截成 8 会让作者以为"最近 20 次"生效了，实际只记住 8 次，是会让招式表行为说谎的那类错。
+     */
+    private static int recentWindow(JsonElement value, String field) throws MoveDataException {
+        int n = (int) requireFloat(value, field);
+        if (n < 1 || n > com.klze.colossus.entity.ColossusBossEntity.RECENT_MOVE_SLOTS) {
+            throw new MoveDataException(field, "窗口必须是 1.."
+                    + com.klze.colossus.entity.ColossusBossEntity.RECENT_MOVE_SLOTS + "，拿到 " + n);
+        }
+        return n;
     }
 
     private static void registerTrigger(String path, TriggerDecoder decoder) {

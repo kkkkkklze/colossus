@@ -59,6 +59,20 @@ final class MoveJsonSelfTest {
                 + "'effect':[{'kind':'damage','damage':2.0},{'kind':'freeze','ticks':20}]}}]}");
         check.accept("telegraph zone with an effect array decodes", composed.frames().size() == 1);
 
+        // 第二十批·招式历史词汇表。行为侧要活 Boss（usedRecently 读实体上的环形历史），
+        // 这里只钉三件事：两个键都注册了、窗口越界被字段级拒、无历史可查时降权是 0（不许锁死选招）
+        MoveDef history = decodeOk("h", "{ 'id':'h', 'duration':40, 'requires':[{'not_recent':4}],"
+                + " 'weight':[{'kind':'base','base':3},{'kind':'recent_band','window':4,'add':-6}],"
+                + " 'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'e'}}]}");
+        var historyCtx = new com.klze.colossus.move.AttackContext(null, null, 25.0).withCandidate(history);
+        check.accept("recent_band adds nothing when there is no history (never locks selection)",
+                history.weight(historyCtx) == 3);
+        check.accept("window out of 1..8 is rejected with the field name",
+                rejects("{ 'id':'b', 'duration':10, 'requires':[{'not_recent':0}],"
+                        + "'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }", "not_recent")
+                        && rejects("{ 'id':'b', 'duration':10, 'requires':[{'not_recent':9}],"
+                        + "'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }", "窗口"));
+
         // ---------- 坏数据：每条都要带字段名 ----------
         check.accept("bad duration is rejected with its field name",
                 rejects("{ 'id':'b', 'duration':0, 'frames':[] }", "duration"));

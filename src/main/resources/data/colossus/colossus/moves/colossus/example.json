@@ -9,7 +9,8 @@
       "post_invuln": 0,
       "weight": [
         { "kind": "base", "base": 3 },
-        { "kind": "distance_band", "min": 0.0, "max": 6.0, "add": 10 }
+        { "kind": "distance_band", "min": 0.0, "max": 6.0, "add": 10 },
+        { "kind": "recent_band", "window": 4, "add": -6 }
       ],
       "requires": [ { "phase_in": [0, 9] } ],
       "frames": [

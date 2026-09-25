@@ -355,6 +355,41 @@ public class ColossusGameTests {
     }
 
     /**
+     * 招式历史环形缓冲回归（第二十批）：出招要进历史、历史要过 NBT。
+     *
+     * <p>判据只取"8 格窗口内查得到/查不到"这种**单调**形式：本桩的 Boss 可能被邻近结构的实体
+     * 勾到目标而自己出招（GameTest 结构从不清场，这是本工程已知的坑），
+     * 所以不断"第几格是它"那种会被自动出招挪位的位置关系，只断"在不在窗口里"。
+     */
+    @GameTest(template = YARD, timeoutTicks = 200, batch = "move-history")
+    public void moveHistoryRecordsCastAndSurvivesSave(GameTestHelper helper) {
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        var roar = Colossus.res("roar");
+        var never = Colossus.res("no_such_move");
+        helper.assertFalse(boss.usedRecently(never, ColossusBossEntity.RECENT_MOVE_SLOTS),
+                "从没放过的招不该出现在历史里（历史环被初始化成\"全命中\"＝not_recent 会永久锁死选招）");
+
+        helper.assertTrue(boss.forceMove(roar), "应能强制出招以写入历史");
+        helper.runAfterDelay(3, () -> {
+            helper.assertTrue(boss.usedRecently(roar, ColossusBossEntity.RECENT_MOVE_SLOTS),
+                    "出过一次的招必须进历史（beginAttack 没记账＝not_recent/recent_band 两条判据全是空转）");
+
+            var tag = new net.minecraft.nbt.CompoundTag();
+            boss.saveWithoutId(tag);
+            boss.discard();
+            ColossusBossEntity revived = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                    new BlockPos(4, 3, 4));
+            revived.load(tag);
+            helper.assertTrue(revived.usedRecently(roar, ColossusBossEntity.RECENT_MOVE_SLOTS),
+                    "历史要入档：重载后失忆会让 Boss 在玩家眼里\"刚放过的招立刻又放一次\"（本轮新增的账没落盘）");
+            helper.assertFalse(revived.usedRecently(never, ColossusBossEntity.RECENT_MOVE_SLOTS),
+                    "读档也不该把没放过的招记成\"刚用过\"");
+            succeedClean(helper, boss, revived);
+        });
+    }
+
+    /**
      * 场上属于**这个 Boss**的示范成员（独立裁判：读成员自己身上的 leaderUUID，不吃 SquadManager 的账）。
      *
      * <p>为什么不能只按类+大窗口数：GameTest 会把多个结构放在彼此不远的地方，
