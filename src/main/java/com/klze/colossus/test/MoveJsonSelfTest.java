@@ -67,6 +67,14 @@ final class MoveJsonSelfTest {
         var historyCtx = new com.klze.colossus.move.AttackContext(null, null, 25.0).withCandidate(history);
         check.accept("recent_band adds nothing when there is no history (never locks selection)",
                 history.weight(historyCtx) == 3);
+        // not_recent 必须是**数据**（引擎要能识别"这条是被历史挡的"并在挡空时放开），
+        // 折进 lambda 就只能靠"看不见"的第二遍兜住（审查轮 10 F1）
+        check.accept("requires.not_recent decodes into MoveDef.notRecent data, not a predicate",
+                history.notRecent() == 4);
+        // 窗口值不许先截断再判界（轮 10 F5：8.9→8 静默通过）
+        check.accept("non-integer window is rejected as a range/shape error, not truncated",
+                rejects("{ 'id':'b', 'duration':10, 'requires':[{'not_recent':8.9}],"
+                        + "'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }", "integer"));
         check.accept("window out of 1..8 is rejected with the field name",
                 rejects("{ 'id':'b', 'duration':10, 'requires':[{'not_recent':0}],"
                         + "'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }", "not_recent")

@@ -33,6 +33,7 @@ public final class StateSelfTest {
         testFrameRepeatingFiresEveryPeriod();
         testFrameRepeatingSkipsBeatsWithoutCompensation();
         testMoveAnimNameDomain();
+        testMoveHistoryRing();
         testContactBook();
         testTableSamplerInterpolation();
         testPartRig();
@@ -275,6 +276,70 @@ public final class StateSelfTest {
             whitespaceRejected = true;
         }
         check("whitespace-only anim name is rejected too", whitespaceRejected);
+    }
+
+    /**
+     * 环形历史（第二十一批从实体里抽成纯件，就是为了让这几条进得了自检）。
+     * 审查轮 10 F4 的原话：只查整环的桩对"方向/容量/0 留给空槽"三件事全都不敏感。
+     */
+    private static void testMoveHistoryRing() {
+        var roar = new net.minecraft.resources.ResourceLocation("colossus", "roar");
+        var sweep = new net.minecraft.resources.ResourceLocation("colossus", "sweep");
+        // path.hashCode() & 0x7F == 0 的 id（实测 big/aon 都是）——+1 没做对就会一出生"刚用过"
+        var zeroValued = new net.minecraft.resources.ResourceLocation("colossus", "big");
+        var h = new com.klze.colossus.move.MoveHistory();
+        check("empty ring answers 'not used' for every id, including a zero-valued one",
+                !h.usedRecently(roar, 8) && !h.usedRecently(zeroValued, 8)
+                        && com.klze.colossus.move.MoveHistory.valueOf(zeroValued) != 0L);
+        h.record(zeroValued);
+        check("a zero-valued id is still recorded (the +1 reserves 0 as 'empty slot')",
+                h.usedRecently(zeroValued, 1));
+
+        var h2 = new com.klze.colossus.move.MoveHistory();
+        h2.record(roar);
+        h2.record(sweep);
+        check("low slot is newest: window 1 sees only the last cast",
+                h2.usedRecently(sweep, 1) && !h2.usedRecently(roar, 1) && h2.usedRecently(roar, 2));
+
+        var h3 = new com.klze.colossus.move.MoveHistory();
+        h3.record(roar);
+        for (int i = 0; i < com.klze.colossus.move.MoveHistory.SLOTS; i++) h3.record(sweep);
+        check("shift drops the oldest: roaring slides out after 8 later casts",
+                !h3.usedRecently(roar, com.klze.colossus.move.MoveHistory.SLOTS)
+                        && h3.usedRecently(sweep, com.klze.colossus.move.MoveHistory.SLOTS));
+
+        var h4 = new com.klze.colossus.move.MoveHistory();
+        h4.record(sweep);
+        h4.record(sweep);
+        check("repeats don't inflate: the window is any-match, not a counter",
+                h4.usedRecently(sweep, 1));
+        var h5 = new com.klze.colossus.move.MoveHistory();
+        h5.record(roar);
+        var restored = new com.klze.colossus.move.MoveHistory();
+        restored.restore(h5.snapshot());
+        check("snapshot/restore round-trips the ring",
+                restored.usedRecently(roar, 1) && restored.snapshot() == h5.snapshot());
+
+        // DSL 侧窗口在登记期拒（JSON 侧走字段级回执，两条都不许静默钳位）
+        boolean win0Rejected = false;
+        boolean win9Rejected = false;
+        var bid = new net.minecraft.resources.ResourceLocation("colossus", "t");
+        try {
+            new com.klze.colossus.move.MoveSetBuilder(null, bid).move("w").duration(10).notRecent(0).done();
+        } catch (IllegalArgumentException expected) {
+            win0Rejected = true;
+        }
+        try {
+            new com.klze.colossus.move.MoveSetBuilder(null, bid).move("w2").duration(10).notRecent(9).done();
+        } catch (IllegalArgumentException expected) {
+            win9Rejected = true;
+        }
+        check("DSL rejects out-of-range notRecent at registration (no silent clamp)",
+                win0Rejected && win9Rejected);
+        var gated = new com.klze.colossus.move.MoveSetBuilder(null, bid)
+                .move("w3").duration(10).notRecent(3).at(1, null).done().builtDefs().get(0);
+        check("notRecent is data the engine can see (MoveDef.notRecent), not an opaque predicate",
+                gated.notRecent() == 3);
     }
 
     private static void testFrameSingleShot() {

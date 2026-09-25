@@ -74,6 +74,7 @@ public final class MoveSetBuilder {
         private String animName;
         private ToIntFunction<AttackContext> weightFn = ctx -> 1;
         private Predicate<AttackContext> extraCheck = ctx -> true;
+        private int notRecent = 0;
         private int postInvuln = 0;
         private final List<FrameRunner.Frame<ColossusBossEntity>> frames = new ArrayList<>();
 
@@ -108,6 +109,23 @@ public final class MoveSetBuilder {
         public MoveBuilder weight(int constant) { this.weightFn = ctx -> constant; return this; }
         /** 附加准入谓词。 */
         public MoveBuilder requires(Predicate<AttackContext> check) { this.extraCheck = this.extraCheck.and(check); return this; }
+
+        /**
+         * 历史准入：最近 {@code window} 次出招里放过本招，这次就不选（防背板）。
+         *
+         * <p>与 {@code requires(ctx -> !ctx.usedRecently(n))} 的区别是这条<b>引擎看得见</b>：
+         * {@link MoveSet#pick} 在整表被历史挡空时会忽略历史门再选一次。环形窗口只由出招推进、
+         * 等待不消解，看不见它的引擎会让 Boss 出现不随时间愈合的空窗甚至永久死锁（审查轮 10 F1）。
+         * 自定义组合（"A 放过之后才准放 B"）才用 {@code requires} 里那个手写谓词。
+         */
+        public MoveBuilder notRecent(int window) {
+            if (window < 1 || window > MoveHistory.SLOTS) {
+                throw new IllegalArgumentException("move " + id + ": notRecent window must be 1.."
+                        + MoveHistory.SLOTS + ", got " + window);
+            }
+            this.notRecent = window;
+            return this;
+        }
 
         /** 命中后写给目标的 invulnerableTime（打后无敌帧；默认 0 允许本招多帧连击）。 */
         public MoveBuilder postInvuln(int ticks) { this.postInvuln = Math.max(0, ticks); return this; }
@@ -159,7 +177,7 @@ public final class MoveSetBuilder {
                 }
             }
             owner.add(new MoveDef(id, duration, cooldown, minPhase, maxPhase, range,
-                    animName, weightFn, extraCheck, postInvuln, List.copyOf(frames)));
+                    animName, weightFn, extraCheck, notRecent, postInvuln, List.copyOf(frames)));
             return owner;
         }
 

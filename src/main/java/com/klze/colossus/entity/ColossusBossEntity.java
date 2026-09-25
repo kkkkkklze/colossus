@@ -223,51 +223,31 @@ public abstract class ColossusBossEntity extends Monster {
     private int scaleCooldown = 0;
     private boolean musicLatch = false;
 
-    // ---------------- 招式历史（第二十批） ----------------
-
-    /** 环形历史装几格（一格 8 位，8×8=64 正好塞进一个 long，移位即自然淘汰最老那格）。 */
-    public static final int RECENT_MOVE_SLOTS = 8;
-    private static final int RECENT_MOVE_BITS = 8;
-    private static final long RECENT_MOVE_MASK = (1L << RECENT_MOVE_BITS) - 1L;
+    // ---------------- 招式历史（第二十批引入，环本体在 move/MoveHistory） ----------------
 
     /**
-     * 最近 {@value #RECENT_MOVE_SLOTS} 次出招 id 的环形历史（低位＝最新）。
-     *
-     * <p>为什么框架要长这一格：v10 扫遍 577 仓，<b>"最近用过的招降权/禁用"零实现</b>
+     * 最近出招的环形历史。为什么框架要长这一格：v10 扫遍 577 仓，<b>"最近用过的招降权/禁用"零实现</b>
      * （库内只有一招一个冷却标量），而连续放同一招正是 BOSS 战被玩家背下来的主因。
-     * 形态选"数据长在实体上"而不是新子类/新表：与 shield、part_bits 同一口径。
+     * 形态守"新维度做成数据、不做新子类"：与 shield、part_bits 同一口径，入档就一个 long。
      *
-     * <p>存的是 id path 段的 hash（值域 1..128，0 留给空槽，见 {@code hashMove}）而不是字符串：
-     * 一个 long 装 8 格，入档一个键。代价是 {@code 1/128} 误判——只会"多禁用一次"，
-     * 不会放行不该放行的招，且 8 格窗口本身是软约束，所以可接受；要精确就得开一条 ListTag，不值。
+     * <p>第二十一批把环抽成 {@link com.klze.colossus.move.MoveHistory}：它的语义（低位＝最新、
+     * 容量＝格数、0 是空槽、溢出丢最老）全是纯算术，留在实体里就只能靠真机桩观测，
+     * 抽出来才进得了纯逻辑自检（审查轮 10 F4 正批在此）。
      */
-    private long recentMoveHashes = 0L;
+    private final com.klze.colossus.move.MoveHistory moveHistory =
+            new com.klze.colossus.move.MoveHistory();
 
-    private void recordMoveInHistory(ResourceLocation id) {
-        this.recentMoveHashes = (this.recentMoveHashes << RECENT_MOVE_BITS) | hashMove(id);
-    }
-
-    /** 这 N 次出招里是否出现过该招（N 上限 {@value #RECENT_MOVE_SLOTS}）。 */
+    /**
+     * 这 N 次出招里是否出现过该招（N 上限见 {@link com.klze.colossus.move.MoveHistory#SLOTS}，
+     * 越界按 {@link #moveHistory} 的口径静默钳位——要登记期就拒请用
+     * {@code MoveSetBuilder.MoveBuilder#notRecent}）。
+     */
     public boolean usedRecently(ResourceLocation moveId, int withinLast) {
-        int n = Math.min(Math.max(1, withinLast), RECENT_MOVE_SLOTS);
-        long h = hashMove(moveId);
-        for (int i = 0; i < n; i++) {
-            if (((this.recentMoveHashes >>> (RECENT_MOVE_BITS * i)) & RECENT_MOVE_MASK) == h) return true;
-        }
-        return false;
+        return this.moveHistory.usedRecently(moveId, withinLast);
     }
 
-    /** 只数 path 段：同 ns 下 {@code colossus:smash} 与 {@code smash} 必须视为同一招。 */
-    private static long hashMove(ResourceLocation id) {
-        // +1 是为了把 0 留给"空槽"：环形缓冲初值是 0，若某招 hash 恰好也是 0，
-        // 它一出生就被当成"刚用过"，not_recent 会永久锁死那一招（1/256 概率的隐形炸弹）。
-        // 代价是值域缩成 1..128，误判率 1/128——仍然只会"多禁用"，不会放行不该放行的招。
-        return (id.getPath().hashCode() & 0x7FL) + 1L;
-    }
-
-    /** 诊断/测试用快照（低位在前）。 */
-    public long recentMoveSnapshot() { return this.recentMoveHashes; }
-
+    /** 诊断/测试用：原始环（低位＝最新）。 */
+    public long recentMoveSnapshot() { return this.moveHistory.snapshot(); }
     protected ColossusBossEntity(EntityType<? extends ColossusBossEntity> type, Level level) {
         super(type, level);
         this.xpReward = 0;
@@ -560,7 +540,7 @@ public abstract class ColossusBossEntity extends Monster {
 
     void beginAttack(MoveDef move) {
         this.contacts.clear(); // 每次出招是全新接触集（DBE 窗口语义）
-        this.recordMoveInHistory(move.id()); // 招式历史（第二十批）：not_recent / recent_band 的输入
+        this.moveHistory.record(move.id()); // 招式历史：notRecent 准入与 recent_band 降权的共同输入
         this.attackMove = move; // 服务端权威：中途 /reload 换表也不影响在播的这招（轮6 P3-3）
         this.entityData.set(DATA_ATTACK_ID, move.id().toString());
         this.entityData.set(DATA_ATTACK_ANIM, move.animName());
@@ -1333,7 +1313,7 @@ public abstract class ColossusBossEntity extends Monster {
             tag.putByteArray("colossus_gates", fired);
         }
         // 无条件写（0 也写）：与 colossus_works 同一口径，读侧才能分清"没历史"与"旧版本没存过"
-        tag.putLong("colossus_recent_moves", this.recentMoveHashes);
+        tag.putLong("colossus_recent_moves", this.moveHistory.snapshot());
     }
 
     @Override
@@ -1347,7 +1327,7 @@ public abstract class ColossusBossEntity extends Monster {
             for (int i = 0; i < fired.length; i++) this.gatesFired[i] = fired[i] != 0;
         }
         if (tag.contains("colossus_recent_moves", net.minecraft.nbt.Tag.TAG_LONG)) {
-            this.recentMoveHashes = tag.getLong("colossus_recent_moves");
+            this.moveHistory.restore(tag.getLong("colossus_recent_moves"));
         }
         if (tag.contains("ColossusDeathItems", net.minecraft.nbt.Tag.TAG_COMPOUND)) {
             // loadAllItems 按槽位 set——必须是预分配 27 格（TF 同款做法）

@@ -132,7 +132,7 @@ public class ExampleColossus extends ColossusBossEntity {
         m.move("sweep")
                 .duration(24).cooldown(40).range(4.5f)
                 .weight(ctx -> ctx.distSq() < 9 ? 5 : 1)
-                .requires(ctx -> !ctx.usedRecently(3))
+                .notRecent(3) // 引擎看得见这一道：整表被历史挡空时会忽略它保底出招
                 .anim("attack_sweep")
                 .at(14, MoveTriggers.arcHit(4.5f, 160f, 6.0f, 0.9f))
                 .done();

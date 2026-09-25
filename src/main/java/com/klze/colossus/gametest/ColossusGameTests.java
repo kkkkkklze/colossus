@@ -367,12 +367,12 @@ public class ColossusGameTests {
                 new BlockPos(4, 3, 4));
         var roar = Colossus.res("roar");
         var never = Colossus.res("no_such_move");
-        helper.assertFalse(boss.usedRecently(never, ColossusBossEntity.RECENT_MOVE_SLOTS),
+        helper.assertFalse(boss.usedRecently(never, com.klze.colossus.move.MoveHistory.SLOTS),
                 "从没放过的招不该出现在历史里（历史环被初始化成\"全命中\"＝not_recent 会永久锁死选招）");
 
         helper.assertTrue(boss.forceMove(roar), "应能强制出招以写入历史");
         helper.runAfterDelay(3, () -> {
-            helper.assertTrue(boss.usedRecently(roar, ColossusBossEntity.RECENT_MOVE_SLOTS),
+            helper.assertTrue(boss.usedRecently(roar, com.klze.colossus.move.MoveHistory.SLOTS),
                     "出过一次的招必须进历史（beginAttack 没记账＝not_recent/recent_band 两条判据全是空转）");
 
             var tag = new net.minecraft.nbt.CompoundTag();
@@ -381,11 +381,54 @@ public class ColossusGameTests {
             ColossusBossEntity revived = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
                     new BlockPos(4, 3, 4));
             revived.load(tag);
-            helper.assertTrue(revived.usedRecently(roar, ColossusBossEntity.RECENT_MOVE_SLOTS),
+            helper.assertTrue(revived.usedRecently(roar, com.klze.colossus.move.MoveHistory.SLOTS),
                     "历史要入档：重载后失忆会让 Boss 在玩家眼里\"刚放过的招立刻又放一次\"（本轮新增的账没落盘）");
-            helper.assertFalse(revived.usedRecently(never, ColossusBossEntity.RECENT_MOVE_SLOTS),
+            helper.assertFalse(revived.usedRecently(never, com.klze.colossus.move.MoveHistory.SLOTS),
                     "读档也不该把没放过的招记成\"刚用过\"");
-            succeedClean(helper, boss, revived);
+
+            // === 保底通道（审查轮 10 F1）===
+            // 环形窗口只由"又出一次招"推进，光等待不消解封锁：整表被历史挡空时如果没有
+            // "只放开历史门"的第二遍，Boss 会出现不随时间愈合的空窗，极端情形是永久死锁。
+            // 这里用同一 id（roar 已在历史里）造一张只有一条被历史挡住的表，直接问 pick。
+            var dice = net.minecraft.util.RandomSource.create(20260925L); // 定种子：桩要可复现
+            var gatedOnly = new com.klze.colossus.move.MoveSetBuilder(revived, ExampleColossus.BOSS_ID)
+                    .move(roar).duration(10).notRecent(com.klze.colossus.move.MoveHistory.SLOTS)
+                    .at(1, null).andBuild();
+            helper.assertTrue(gatedOnly.pick(
+                            new com.klze.colossus.move.AttackContext(revived, null, 0.0),
+                            id -> 0, dice).isPresent(),
+                    "整表被历史挡空时必须保底出招（没有＝空窗不随等待消解，示范表实测能干站 70~140t）");
+            // 反向：保底只放开历史门，普通谓词挡住的不许放行
+            var hardGated = new com.klze.colossus.move.MoveSetBuilder(revived, ExampleColossus.BOSS_ID)
+                    .move(Colossus.res("probe_hard")).duration(10).requires(ctx -> false)
+                    .at(1, null).andBuild();
+            helper.assertTrue(hardGated.pick(
+                            new com.klze.colossus.move.AttackContext(revived, null, 0.0),
+                            id -> 0, dice).isEmpty(),
+                    "保底不得越过普通谓词/阶段/距离门（越了就是把没解锁的招放出来）");
+
+            // === 降权不许压成禁选（审查轮 10 F2）===
+            // demo 表在 8 格外的原始权重是 base 3 + distance_band(0)＝3，加上 recent_band(-6)＝-3；
+            // 老写法会被 pick 的 w<=0 整条丢掉，于是"降权仍可选"其实是禁选——与 notRecent 撞成一件事。
+            // 判据：放过一次 quake 之后，远端 30 次掷骰里它仍要出现至少一次（修前恒 0 次）。
+            var quake = Colossus.res("datapack_quake");
+            helper.assertTrue(revived.moveSet().byId(quake) != null,
+                    "demo 数据包的招该合进示范 Boss 的表（没合进来这条判据就是空转）");
+            helper.assertTrue(revived.forceMove(quake), "先强制放一次 quake，把它写进历史");
+            helper.runAfterDelay(45, () -> { // quake duration 40：等它收招，forceMove 才轮得到下一发
+                int seen = 0;
+                var far = new com.klze.colossus.move.AttackContext(revived, null, 100.0 * 100.0);
+                // 8 格外只剩 {roar:1, quake:1}（smash/sweep 被 range 挡，meteor/icering/flamewall
+                // 被 phase(1,9) 挡），quake 排在表尾 ⇒ 定种子第 2 掷必中；去掉 floor 后它是 -3 整个出局，
+                // 一次都不会中。两头都稳，不靠运气。
+                for (int i = 0; i < 12; i++) {
+                    var got = revived.moveSet().pick(far, id -> 0, net.minecraft.util.RandomSource.create(7L));
+                    if (got.isPresent() && quake.equals(got.get().id())) seen++;
+                }
+                helper.assertTrue(seen >= 1,
+                        "放过的 quake 在远端仍要被选得到（12 次里 0 次＝recent_band 把权重压成非正被整条丢掉）");
+                succeedClean(helper, boss, revived);
+            });
         });
     }
 

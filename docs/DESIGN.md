@@ -79,7 +79,13 @@ protected void registerMoves(MoveSetBuilder m) {
      .at(24, MoveTriggers.event("smash_ring"));            // 客户端特效事件
 }
 ```
-调度：空闲态 → 有目标 → `MoveSet.pick(ctx, cooldownLeft, random)`（过滤阶段/距离/准入 → 扣冷却 → 加权随机）→ `AttackState`。AttackState 每 tick 比对 `self.tick()` 触发帧表，**服务端单帧结算**，结束回 idle。冷却表挂在实体（`Map<ResourceLocation,Integer>`，写入值＝`cooldown+duration`），随阶段可由权重函数修饰。JSON 侧同一词汇表：`requires` 认 `phase_in`/`target_within`/`target_beyond`/`not_recent`，`weight` 认 `base`/`distance_band`/`recent_band`，条目封顶 16 条。
+调度：空闲态 → 有目标 → `MoveSet.pick(ctx, cooldownLeft, random)`（过滤阶段/距离/准入 → 扣冷却 → 加权随机）→ `AttackState`。AttackState 每 tick 比对 `self.tick()` 触发帧表，**服务端单帧结算**，结束回 idle。冷却表挂在实体（`Map<ResourceLocation,Integer>`，写入值＝`cooldown+duration`），随阶段可由权重函数修饰。JSON 侧同一词汇表：`requires` 认 `phase_in`/`target_within`/`target_beyond`/`not_recent`，
+`weight` 认 `base`/`distance_band`/`recent_band`，条目封顶 16 条。两条历史类判据的语义要说准
+（第二十一批按审查轮 10 修正）：`notRecent` 是 **`MoveDef` 上的数据字段**而不是折进谓词的 lambda——
+引擎必须认得出"这条是被历史挡的"，才能在**整表被历史挡空时只放开这一道再选一遍**
+（环形窗口只由出招推进、等待不消解，看不见它的引擎会让 Boss 干站 70~140t 甚至永久死锁）；
+`weight.recent_band` 的降权**地板是 1**，压不成禁选（普通项之和若非正才算真禁用），
+否则"降权仍可选"与"禁用"就是同一件事的两个入口。
 
 ### 2.3 生命周期（基类固化）
 - **接敌**：`startSeenByPlayer` → bar 可见；`EngagementTracker` hurt 收集，10 分钟 TTL 剔除死亡/超距。
@@ -445,3 +451,28 @@ protected void registerMoves(MoveSetBuilder m) {
 > 预警轮廓入 NBT、GL addon 运行期复验、`GuiGraphics` 自绘纹理消费端、许可证裁定仍在账上。
 > 验证：build（`-Pgecko`）+ 自检 **71/71**（+2：无历史时降权为 0、窗口越界字段级拒）+ audit **13** +
 > GameTest **All 13 passed**（新桩 `move-history` 证"出招进历史 + 历史过 NBT"，另跑两轮稳定）。
+
+> 进度（2026-09-25 第二十一批·审查轮 10 处置）：✅ 修掉一条**结构性**缺陷——上一批的 `not_recent`
+> 折进 `extraCheck` 后引擎看不见它，而"最近 N 次"这种环形窗口**只由出招推进、等待不消解**，
+> 于是挡空是不随时间愈合的空窗：示范表贴脸最坏 70t、目标 8 格外 140t（无历史门时 40t/90t），
+> 每条招都挂 `notRecent >= 表长` 时是**永久死锁**（`resetAttacks` 只清冷却救不了）。
+> 修法是把这一道升成数据：`MoveDef.notRecent` 字段 + DSL `.notRecent(n)` + JSON `requires.not_recent`
+> 都写它，`MoveSet.pick` 分两遍——**只**放开历史门，阶段/距离/自定义谓词/冷却/权重≤0 照样硬拒
+> （正向与反向断言各一条）。窗口值域三处钉死：DSL setter 抛带招式名的 IAE、JSON 给字段级回执、
+> 构造器兜底；表内每条都挂满窗口时构造期打一条 warn 说破"作者要的其实是轮换"（本批跑桩时真的响了）。
+> ✅ `recent_band` 的语义纠正：原先 `base 3 + recent -6 = -3` 会被 `pick` 整条丢掉，
+> "降权仍可选"其实是禁选——现在普通项与历史项分路，历史项地板 1；GameTest 用定种子第 2 掷钉住。
+> ✅ 环本体抽成纯件 `move/MoveHistory`，自检因此能钉住方向（低位＝最新）、容量（滑出 8 格即失效）、
+> "0 留给空槽"（`colossus:big` 这种 `hashCode & 0x7F == 0` 的 id 记进去仍查得到）、重复记录不虚高、
+> snapshot/restore 往返——共 +8 条；类上再加 `static` 不变量（值域+1 必须小于槽宽、`BITS*SLOTS==64`），
+> 槽宽/值域不匹配就 `ExceptionInInitializerError`，把"日后有人把掩码抬成 0xFF 又留着 +1"这种
+> 会造成**假阴性**（该禁没禁）的退化变成启动即炸而不是静默失效。
+> ✅ `requireInt`：JSON 数值先判整再判界（`{"not_recent":8.9}` 从"静默截成 8"变字段级拒，
+> `true`/`"abc"` 也不再退化成一串不带字段名的"解析炸了"）。
+> 两处不改并写明理由：**DSL 运行期 `ctx.usedRecently(20)` 仍静默钳到 8**（这行跑在每 tick 的选招
+> 路径上，抛异常＝把数据错误炸进战斗，轮 9 刚踩过；要登记期拒请用 `.notRecent()`，不对称写进 javadoc）；
+> 轮 8 那条"`ServerLevel.entityByUuid` 注销不校验身份"的机制**我至今没在 sources jar 里核到**
+> （只能核到 `getEntities().get(uuid)` 与 `addWithUUID` 的重复 UUID warn），已降级为纪律
+> "别拿同 UUID 两具实体做 UUID 查找"，具体机制不再断言。另修一处注释说谎：`withCandidate`
+> 并非"同实例返回 this 所以零分配"，产线 ctx 的 candidate 恒空、每候选确实新建一个 record。
+> 验证：build（`-Pgecko`）+ 自检 **81/81**（+10）+ audit **13** + GameTest **All 13 passed**。

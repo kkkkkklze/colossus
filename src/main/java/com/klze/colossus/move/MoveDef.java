@@ -27,12 +27,21 @@ public final class MoveDef {
     private final String animName;
     private final ToIntFunction<AttackContext> weightFn;
     private final Predicate<AttackContext> extraCheck;
+    /**
+     * 历史准入窗口：最近这么多次出招里放过本招，本次就不选（0＝不设）。
+     *
+     * <p>为什么做成字段而不是折进 {@code extraCheck}：{@link MoveSet} 必须在"整表被历史挡空"时
+     * <b>忽略这一道再选一次</b>（审查轮 10 F1：环形窗口只由出招推进，等待不会消解封锁，
+     * 挂满窗口就是一条不随时间愈合的空窗，甚至永久死锁）。引擎看不见 lambda 挡的是哪一条，
+     * 就只能把它做成数据——顺带也让登记期能把窗口值拒在 {@code 1..MoveHistory.SLOTS}。
+     */
+    private final int notRecent;
     private final int postAttackInvuln;
     private final List<FrameRunner.Frame<com.klze.colossus.entity.ColossusBossEntity>> frames;
 
     MoveDef(ResourceLocation id, int duration, int cooldownTicks, int minPhase, int maxPhase,
             float range, String animName, ToIntFunction<AttackContext> weightFn,
-            Predicate<AttackContext> extraCheck, int postAttackInvuln,
+            Predicate<AttackContext> extraCheck, int notRecent, int postAttackInvuln,
             List<FrameRunner.Frame<com.klze.colossus.entity.ColossusBossEntity>> frames) {
         this.id = id;
         this.duration = duration;
@@ -47,6 +56,11 @@ public final class MoveDef {
             throw new IllegalArgumentException("move " + id + ": animName must be non-blank");
         }
         this.animName = animName;
+        if (notRecent < 0 || notRecent > MoveHistory.SLOTS) {
+            throw new IllegalArgumentException("move " + id + ": notRecent window must be 0.."
+                    + MoveHistory.SLOTS + ", got " + notRecent);
+        }
+        this.notRecent = notRecent;
         this.weightFn = weightFn;
         this.extraCheck = extraCheck;
         this.postAttackInvuln = postAttackInvuln;
@@ -58,14 +72,14 @@ public final class MoveDef {
      *
      * <p>刻意只多一个工厂、不多一套模型：两条路产出<b>同一个不可变 {@code MoveDef}</b>，
      * 帧执行、选招准入、血条解析全部共用——不出现"JSON 招式少半边能力"的特例。
-     * 校验责任在调用方（{@code MoveCodec} 与 {@code MoveSetBuilder} 各自在登记期把住）。
+     * 值域由本构造器兜底（anim 非空、{@code notRecent} 在 0..8），调用方另给字段级回执。
      */
     public static MoveDef of(ResourceLocation id, int duration, int cooldownTicks, int minPhase, int maxPhase,
                              float range, String animName, ToIntFunction<AttackContext> weightFn,
-                             Predicate<AttackContext> extraCheck, int postAttackInvuln,
+                             Predicate<AttackContext> extraCheck, int notRecent, int postAttackInvuln,
                              List<FrameRunner.Frame<com.klze.colossus.entity.ColossusBossEntity>> frames) {
         return new MoveDef(id, duration, cooldownTicks, minPhase, maxPhase, range, animName,
-                weightFn, extraCheck, postAttackInvuln, java.util.List.copyOf(frames));
+                weightFn, extraCheck, notRecent, postAttackInvuln, java.util.List.copyOf(frames));
     }
 
     public ResourceLocation id() { return id; }
@@ -78,11 +92,22 @@ public final class MoveDef {
     /** 客户端动画名（同步协议用字符串；无动画后端时可忽略）。 */
     public String animName() { return animName; }
 
-    /** 选招准入：阶段门 + 距离门 + 自定义谓词。 */
+    /** 历史准入窗口（0＝不设）。 */
+    public int notRecent() { return notRecent; }
+
+    /** 选招准入：阶段门 + 距离门 + 自定义谓词。<b>不含</b>历史门——见 {@link #blockedByHistory}。 */
     public boolean available(AttackContext ctx) {
         if (ctx.phase() < minPhase || ctx.phase() >= maxPhase) return false;
         if (range > 0 && ctx.distSq() > (double) range * range) return false;
         return extraCheck.test(ctx);
+    }
+
+    /**
+     * 历史门是否挡住本招。要求 {@code ctx} 是由 {@code ctx.withCandidate(this)} 得来的
+     * （{@link MoveSet#pick} 保证这一点）；否则查的是别的招的历史，结论无意义。
+     */
+    public boolean blockedByHistory(AttackContext ctx) {
+        return this.notRecent > 0 && ctx.usedRecently(this.notRecent);
     }
 
     /** 上下文权重（<=0 视为不可选）。 */

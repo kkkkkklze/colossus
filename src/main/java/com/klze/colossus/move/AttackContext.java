@@ -33,6 +33,11 @@ public record AttackContext(ColossusBossEntity boss, LivingEntity target, double
      * 候选招式在最近 {@code withinLast} 次出招里是否出现过。
      * 候选位空或没有实体（纯逻辑自检里构造的 ctx）时返回 false——即"没用过"，
      * 于是 {@code not_recent} 会放行，判据在无历史可查时不会锁死选招。
+     *
+     * <p><b>窗口越界是静默钳到 {@code MoveHistory.SLOTS} 的</b>（这里跑在每 tick 的选招路径上，
+     * 抛异常＝把数据错误炸进战斗）。要"登记期就把窗口写错拦下来"，请用一等的
+     * {@code MoveSetBuilder.MoveBuilder#notRecent} 或 JSON 的 {@code requires.not_recent}——
+     * 那两条都会拒（审查轮 10 F3 点出的不对称，这里明说而不是假装一致）。
      */
     public boolean usedRecently(int withinLast) {
         if (this.boss == null || this.candidate == null) return false;

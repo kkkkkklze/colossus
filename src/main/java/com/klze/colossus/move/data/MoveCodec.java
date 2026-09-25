@@ -50,6 +50,12 @@ public final class MoveCodec {
      * 封顶取 16：真实招式表里没人叠这么多调制项，超了就是写错或恶意。
      */
     private static final int MAX_WEIGHT_ENTRIES = 16;
+
+    /** 按"最近是否用过"调权的 kind（普通项与历史项在 {@link #decodeWeights} 里分路）。 */
+    private static final java.util.Set<String> HISTORY_WEIGHT_KEYS = java.util.Set.of("recent_band");
+
+    /** requires 里的保留键：不折进谓词，解成 {@code MoveDef.notRecent} 数据（见 decodeConditions）。 */
+    private static final String NOT_RECENT_KEY = "not_recent";
     private static final int MAX_CONDITIONS_PER_MOVE = 16;
 
     /** 一条记录一个错误串；由 loader 汇总打印（静默跳过会被误认为生效）。 */
@@ -159,15 +165,9 @@ public final class MoveCodec {
             double dist = requireFloat(value, "requires.target_beyond");
             return ctx -> ctx.distSq() > dist * dist;
         });
-        // 第二十批·招式历史。v10 扫遍 577 仓，"最近用过的招要禁用/降权"这一格是**零实现**
-        // （库内只有一招一个冷却标量），所以这不是照抄而是补空缺：
-        //   {"requires":[{"not_recent":4}]}          —— 近 4 次用过就整条不许选
-        //   {"weight":[…,{"kind":"recent_band","window":4,"add":-6}]} —— 用过就降权，仍可被选中
-        // 前者防重复感、后者保权重连续，两种语义各有用处，别只留一种。
-        CONDITION_KEYS.put("not_recent", value -> {
-            int window = recentWindow(value, "requires.not_recent");
-            return ctx -> !ctx.usedRecently(window);
-        });
+        // `not_recent` 在这里**不注册**：它是保留键，解成 MoveDef.notRecent 这个数据字段而不是折进
+        // lambda。引擎必须认得出"这条是被历史挡的"，才能在整表被挡空时只放开这一道做保底
+        // （审查轮 10 F1：环形窗口只由出招推进，等待不消解封锁）。
 
         WEIGHT_KEYS.put("base", el -> {
             int base = (int) requireFloat(el.get("base"), "weight.base"); // 取成员值，不是整行对象
@@ -182,9 +182,27 @@ public final class MoveCodec {
         });
         WEIGHT_KEYS.put("recent_band", el -> {
             int window = recentWindow(el.get("window"), "weight.recent_band.window");
-            int add = (int) requireFloat(el.get("add"), "weight.recent_band.add"); // 通常是负数＝降权
+            int add = requireInt(el.get("add"), "weight.recent_band.add"); // 通常是负数＝降权
             return ctx -> ctx.usedRecently(window) ? add : 0;
         });
+    }
+
+    /** 整数值读取：非整数/非数字一律字段级拒（原先 {@code (int) requireFloat} 会把 8.9 静默截成 8）。 */
+    private static int requireInt(JsonElement el, String field) throws MoveDataException {
+        if (el == null || !el.isJsonPrimitive()) throw new MoveDataException(field, "missing or not a number");
+        double d;
+        try {
+            d = el.getAsDouble();
+        } catch (RuntimeException notNumber) { // 布尔/字符串在 gson 里就炸在这，回执要带字段名
+            throw new MoveDataException(field, "expected a number, got " + el);
+        }
+        if (d != Math.rint(d) || Double.isNaN(d) || Double.isInfinite(d)) {
+            throw new MoveDataException(field, "expected an integer, got " + el.getAsString());
+        }
+        if (d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) {
+            throw new MoveDataException(field, "超出 int 域：" + el.getAsString());
+        }
+        return (int) d;
     }
 
     /**
@@ -192,10 +210,10 @@ public final class MoveCodec {
      * 截成 8 会让作者以为"最近 20 次"生效了，实际只记住 8 次，是会让招式表行为说谎的那类错。
      */
     private static int recentWindow(JsonElement value, String field) throws MoveDataException {
-        int n = (int) requireFloat(value, field);
-        if (n < 1 || n > com.klze.colossus.entity.ColossusBossEntity.RECENT_MOVE_SLOTS) {
+        int n = requireInt(value, field);
+        if (n < 1 || n > com.klze.colossus.move.MoveHistory.SLOTS) {
             throw new MoveDataException(field, "窗口必须是 1.."
-                    + com.klze.colossus.entity.ColossusBossEntity.RECENT_MOVE_SLOTS + "，拿到 " + n);
+                    + com.klze.colossus.move.MoveHistory.SLOTS + "，拿到 " + n);
         }
         return n;
     }
@@ -244,12 +262,13 @@ public final class MoveCodec {
         }
 
         var weightFn = decodeWeights(el);
-        var check = decodeConditions(el);
+        Conditions cond = decodeConditions(el);
+        var check = cond.check();
         ResourceLocation id = ResourceLocation.tryParse(ns.getNamespace() + ":" + key);
         if (id == null) throw new MoveDataException("id", "不是合法的招式 id：" + key
                 + "（合法字符：小写字母/数字/._-，路径段以 / 分隔）");
         return MoveDef.of(id, duration, cooldown, minPhase, maxPhase, range, anim,
-                weightFn, check, postInvuln, frames);
+                weightFn, check, cond.notRecent(), postInvuln, frames);
     }
 
     private static List<com.klze.colossus.state.FrameRunner.Frame<ColossusBossEntity>> decodeFrames(JsonObject el)
@@ -311,6 +330,7 @@ public final class MoveCodec {
             throw new MoveDataException("weight", "条目数 " + arr.size() + " 超上限 " + MAX_WEIGHT_ENTRIES);
         }
         List<ToIntFunction<AttackContext>> parts = new ArrayList<>();
+        List<ToIntFunction<AttackContext>> historyParts = new ArrayList<>();
         for (int i = 0; i < arr.size(); i++) {
             if (!(arr.get(i) instanceof JsonObject row)) {
                 throw new MoveDataException("weight[" + i + "]", "not an object");
@@ -318,18 +338,28 @@ public final class MoveCodec {
             String kind = requireString(row, "kind");
             WeightDecoder d = WEIGHT_KEYS.get(kind);
             if (d == null) throw new MoveDataException("weight[" + i + "].kind", "unknown weight '" + kind + "'");
-            parts.add(d.decode(row));
+            // 历史项与普通项分开攒：轮 10 F2 实测 demo 表在 >6 格时 3-6=-3 整条被 pick 丢掉，
+            // 于是"降权仍可选"其实是禁选——与 notRecent 撞成同一件事，还更隐蔽。
+            // 规则：普通项之和若非正，那是作者真的要禁用（保留）；历史项只能在正数基础上往下压，
+            // 且地板是 1（可选但几乎不会被选中）。
+            (HISTORY_WEIGHT_KEYS.contains(kind) ? historyParts : parts).add(d.decode(row));
         }
         return ctx -> {
             int sum = 0;
             for (var p : parts) sum += p.applyAsInt(ctx);
+            if (sum <= 0 || historyParts.isEmpty()) return sum;
+            for (var p : historyParts) sum = Math.max(1, sum + p.applyAsInt(ctx));
             return sum;
         };
     }
 
-    private static Predicate<AttackContext> decodeConditions(JsonObject el) throws MoveDataException {
+    /** requires 的解码结果：普通条件折成谓词，历史门单独带回（引擎要能忽略它做保底）。 */
+    record Conditions(Predicate<AttackContext> check, int notRecent) {}
+
+    private static Conditions decodeConditions(JsonObject el) throws MoveDataException {
         Predicate<AttackContext> check = ctx -> true;
-        if (!el.has("requires")) return check;
+        int notRecent = 0;
+        if (!el.has("requires")) return new Conditions(check, 0);
         if (!(el.get("requires") instanceof JsonArray arr)) {
             throw new MoveDataException("requires", "expected an array");
         }
@@ -342,14 +372,21 @@ public final class MoveCodec {
             }
             String key = row.entrySet().iterator().next().getKey();
             JsonElement value = row.get(key);
+            if (NOT_RECENT_KEY.equals(key)) { // 保留键：单独带回，不折进 lambda
+                if (notRecent != 0) throw new MoveDataException("requires[" + i + "]", "not_recent 只能出现一次");
+                notRecent = recentWindow(value, "requires[" + i + "].not_recent");
+                continue;
+            }
             ConditionDecoder d = CONDITION_KEYS.get(key);
             if (d == null) {
+                java.util.List<String> known = new java.util.ArrayList<>(CONDITION_KEYS.keySet());
+                known.add(NOT_RECENT_KEY);
                 throw new MoveDataException("requires[" + i + "]", "unknown condition '" + key
-                        + "' (known: " + String.join(", ", CONDITION_KEYS.keySet().stream().sorted().toList()) + ")");
+                        + "' (known: " + String.join(", ", known.stream().sorted().toList()) + ")");
             }
             check = check.and(d.decode(value));
         }
-        return check;
+        return new Conditions(check, notRecent);
     }
 
     private static MoveTrigger decodeTriggerField(JsonElement el, String field) throws MoveDataException {
