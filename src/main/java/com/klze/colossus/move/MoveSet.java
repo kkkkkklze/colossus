@@ -27,7 +27,7 @@ public final class MoveSet {
     /**
      * Java DSL 为底 + datapack 同名覆盖（第十四批）。
      *
-     * <p>覆盖而非并存：同名两条都进表的话，{@code byId/indexOf} 取首个＝谁先注册看运气，
+     * <p>覆盖而非并存：同名两条都进表的话，{@code byId} 取首个＝谁先注册看运气，
      * 而整合包作者改 JSON 的本意就是"我要换掉这一招"。覆盖必然打日志——不留静默改命。
      */
     public static MoveSet merge(com.klze.colossus.entity.ColossusBossEntity boss,

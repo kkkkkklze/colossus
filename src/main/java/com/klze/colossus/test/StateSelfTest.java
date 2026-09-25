@@ -213,6 +213,20 @@ public final class StateSelfTest {
         var due3 = restored.consumeDue(10000L);
         check("NBT roundtrip keeps pending", due2.equals(List.of("tentacle_b"))
                 && due3.equals(List.of("tentacle_c")) && restored.size() == 0);
+
+        // 撤单（轮 7 P1-4）：队长倒下要把<b>已经在途</b>的排期整张撤掉——
+        // 只挡"以后还能不能排"的写法会在 100t 死亡演出里到点补员，补出来的那具收不到收摊广播。
+        // 判据取"到点也拿不出人 + 存档里也没了"，不只看 size（防"只清了视图"的假撤单）。
+        s.schedule("tentacle_a", 3000L);
+        s.schedule("tentacle_b", 3500L);
+        s.cancelAll();
+        net.minecraft.nbt.CompoundTag afterCancel = new net.minecraft.nbt.CompoundTag();
+        s.save(afterCancel);
+        var revived = new com.klze.colossus.entity.squad.RespawnSchedule();
+        revived.load(afterCancel);
+        check("cancelAll really empties the schedule (due-time + save)",
+                s.size() == 0 && s.consumeDue(99999L).isEmpty() && !s.isScheduled("tentacle_a")
+                        && revived.size() == 0);
     }
 
     private static State<List<String>> countingState(List<String> log, String tag, int endAt) {
@@ -330,10 +344,11 @@ public final class StateSelfTest {
                         && new com.klze.colossus.env.ZoneBurst(3.0f, 0.0f, 0)
                         .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.9f, 20)).freezeTicks() == 20);
 
-        // 残缺条目（没 burst 段）不能让读档炸——ZoneWork.execute 里是 warn + return
+        // 这条只证 DFU 的缺键回落（getCompound 返回新空标签、不抛）；
+        // ZoneWork.execute 的两道弃单门（未知种类 / 残缺载荷）由 GameTest deferred-work 覆盖
         var broken = new net.minecraft.nbt.CompoundTag();
         broken.put("zone", zone.toTag());
-        check("burst 段缺失时 encode/decode 不抛（execute 侧留痕丢弃）",
+        check("missing burst tag reads as an empty burst (no throw)",
                 com.klze.colossus.env.ZoneBurst.fromTag(broken.getCompound("burst")).empty());
     }
 

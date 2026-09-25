@@ -83,11 +83,13 @@ protected void registerMoves(MoveSetBuilder m) {
 ### 2.3 生命周期（基类固化）
 - **接敌**：`startSeenByPlayer` → bar 可见；`EngagementTracker` hurt 收集，10 分钟 TTL 剔除死亡/超距。
 - **阶段**：`checkPhaseGates()` 在 aiStep 头部跑一次性阈值（0.66/0.33 默认表可覆写）→ push `PhaseChangeState`（期间 `hurt` 返回 false 全免伤，动画帧点真正 `setPhase(n)`，同时 `resetAttacks()` 清冷却——Ignis 语义）。
-- **死亡**：`hurt` 检测 hp≤0 → 钉住血量进入 `DeathState`（免伤、清 bar、停 AI），动画时长到 → `resolveDeath()`：killBoard 记录 → 全体参战者补 `PLAYER_KILLED_ENTITY` 触发 → 挑战次数 +1 → 掉落（v0.1 即时 vanilla 掉落；战利品缓冲入箱 = v0.2，TF IBossLootBuffer 方案已设计好）。
+- **死亡**：`hurt` 检测 hp≤0 → 钉住血量进入 `DeathState`（hp 钉在 1.0 免伤、血条清零并隐藏、停音乐、**清空延迟队列**、squad 收摊——广播 + 撤掉在途重生排期，轮 7 P1-4 把它从结算处提前到演出开场），动画时长到 → `resolveDeath()`：killBoard 记录 → 全体参战者补 `PLAYER_KILLED_ENTITY` 触发 → 挑战次数 +1 → 掉落（`LootDelivery.VANILLA` 即时 / `INTO_CHEST` 缓冲入箱，第五批已落）。
 - **缩放**：`finalizeSpawn` + 每 10t 复查附近存活玩家数，`ScalingStrategy` 默认 `1+(sqrt(n)-1)*0.5`，用 `addTransientModifier` + 血量百分比回填。
 
 ### 2.4 同步契约（entityData，全 int/bool/string）
-`PHASE / ATTACK_INDEX(-1=idle) / ATTACK_TICK / ACTIVATED / DEATH_TICK`；客户端渲染器读 `ATTACK_INDEX → MoveDef.anim 名 + ATTACK_TICK`，动画后端自决映射。血条样式走 `BarStyleS2C{barUUID, renderType}`。
+`PHASE / ATTACK_ID / ATTACK_ANIM / ATTACK_DURATION / ATTACK_TICK / ATTACK_SEQ / SHIELD / DEATH_TICK / ACTIVATED`；
+客户端渲染器与动画适配器只读这些串/数（`ATTACK_ANIM` 就是动画名，`ATTACK_SEQ` 用来分辨"连放同一招"的新一次施法），
+**不需要持有招式表**——datapack 表在多人客户端可能根本没加载（轮 6 P1，旧 `ATTACK_INDEX` 形态因此作废）。血条样式走 `BarStyleS2C{barUUID, renderType}`，护盾走 `BarShieldS2C`。
 
 ## 3. v0.1 范围裁定
 
@@ -99,7 +101,7 @@ protected void registerMoves(MoveSetBuilder m) {
 无头优先（用户无法操作客户端）：
 1. `gradlew build` 绿——状态机/selector/相位/缩放曲线写 **JUnit-free 纯逻辑自检**（`state`/`move` 包不 import net.minecraft，可被 `dev.klze.colossus.test` 的 main 方法 runner 直接跑）。
 2. GameTest（`colossus:boss_smoke`）：生成示范 Boss → 断言 bar 装配/状态机切换/判定命中玩家假实体。
-3. 数据断言：KillBoard NBT、ATTACK_INDEX 同步值从磁盘/世界回读。
+3. 数据断言：KillBoard NBT、`ATTACK_*`/`SHIELD`/`colossus_works` 同步值从磁盘/世界回读。
 
 ## 5. 偏差与遗留记录（交付时同步更新）
 - 许可证暂留 All Rights Reserved——框架定位是"方便别人写 Boss"，建议改 MIT/LGPL 才成生态底座，待用户拍板。
@@ -314,3 +316,27 @@ protected void registerMoves(MoveSetBuilder m) {
 > `MoveCodec.java` 一度变成 47 万行——已按该文件最后一次提交恢复（无未提交工作丢失），坏文件留在 `/tmp/MoveCodec.corrupted.bak`。
 > 规矩：**改文件别用 index 切片 + 全局 replace，用精确 Edit**。
 > 边界：telegraph 的**客户端轮廓**不持久化（重载后圈子的伤害照落、轮廓消失），要一起恢复得让 ZoneSync 也进 NBT，记 v0.3。
+
+> 进度（2026-09-25 第十七批·审查轮 7 处置 + 测试隔离面重构）：✅ addon 与渲染层的门全部改读同步数据
+> （`attackAnimName()`/`isAttacking()`），动画名新增 `DATA_ATTACK_ANIM` 由服务端下发——
+> 轮 6 只改了内核，**客户端侧还留着 `currentAttack()` 这个服务端权威对象当门**，等于把最核心的演示路径打断。
+> 待办队列补齐三道门：handler 故障隔离（`catch Throwable`，下游扩展点不能炸成持久 Boss 的崩溃循环）、
+> `PriorityQueue` 按到期时刻（`ArrayDeque` 的 FIFO 会让长延后头阻塞短延后）、`MAX_PENDING_WORK=32`；
+> 读档时**过期条目直接丢弃**（卸载期间 gameTime 照走，重载后立刻落一发没预警的圈＝tell 撒谎），
+> `ZoneWork` 加 `isDeathPending()` 门 + 弃单/结算 DEBUG 诊断。
+> **本批最重的收获在测试本身**：①轮 7 我换断言时漏删外层 `helper.succeed()`，而 1.20.1
+> `GameTestInfo.tick()` 首行 `if (!this.isDone())` —— 先 succeed 之后延迟待办**永不执行**，
+> 那条新断言一次都没跑过却记在"通过"名下；②`GameTestBatchRunner` 逐批串行但**结构从不清场**，
+> 留下的活 Boss 会在后面每一批继续 tick（自己被打死→给 KillBoard 多记一刀→别的桩"增量 +1"变 +2，
+> 攻击/telegraph 够得到邻近结构→牛掉血超预期，同一份代码两轮分别报 8.0/10.0）。
+> 于是加统一收尾 `succeedClean(helper, bosses…)`，并把"何时到期/落几次"的观测面从牛的血量换成
+> 桩自带的**隔离计数器**（新登记 `colossus:gametest_ping` 待办，只写这个实例的 `getPersistentData()`），
+> 牛那条降到"至少一发 4 点"；收摊判据口径从"名单为空"改"无人存活"（`die()` 的尸体还要 ~20t 才 `isRemoved`）。
+> 另修一处真缺陷：`notifyLeaderDeath` 只挡新排期、**不撤在途**，而死亡演出默认 100t 里 squad 照常 tick
+> → 到点补出来的那具收不到广播（javadoc 声称已挡住的事故）；`RespawnSchedule.cancelAll()` +
+> 收摊提前到演出开场，`resolveDeath` 里的旧调用删除（不留第二条路径）。
+> 验证：build（含 `-Pgecko` addon 编译 + `jarColossusGecko`）+ **62/62** + audit **11** +
+> GameTest **All 11 required tests passed**，且**连跑四轮全绿**。
+> 遗留：多人客户端动画表现仍无法自证（起不了真客户端，addon 无 geo 资产）；`requires`/`weight`
+> 谓词面扩展、ZoneSync 入 NBT（重载后预警轮廓消失但伤害照落）、`not_recent`/连招历史、
+> BossBar 自定义纹理消费者、许可证裁定（仍 ARR）、`build/libs/examplemod-1.0.0.jar` 待清。

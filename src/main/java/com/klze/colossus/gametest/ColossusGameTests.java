@@ -27,6 +27,44 @@ public class ColossusGameTests {
     private static final String YARD = "colossus_yard";
 
     /**
+     * 本桩专用的可计数待办种类（轮 7）：处理器只往**这个 Boss 实例自己的** persistentData
+     * 上加一改——别的桩在世界里怎么串扰都动不到它，于是"到期时刻对不对""一发落没落第二次"
+     * 这两条判据第一次有了隔离的观测面。
+     */
+    private static final String PING_KIND = "colossus:gametest_ping";
+    private static final String PING_KEY = "colossus_gametest_ping";
+
+    static {
+        try {
+            ColossusBossEntity.registerDeferredWork(PING_KIND, (boss, data) -> boss.getPersistentData()
+                    .putInt(PING_KEY, boss.getPersistentData().getInt(PING_KEY) + 1));
+        } catch (IllegalStateException alreadyRegistered) {
+            // 同一 JVM 二次加载本类：种类已在注册表里，无需第二个 handler
+        }
+    }
+
+    /** 读隔离计数器（0＝一次都没落）。 */
+    private static int pingCount(ColossusBossEntity boss) {
+        return boss.getPersistentData().getInt(PING_KEY);
+    }
+
+    /**
+     * 收尾：先清掉本桩立起来的 Boss，再报成功（轮 7）。
+     *
+     * <p>为什么必须清：{@code GameTestBatchRunner} 是**逐批串行**的，但**结构从不清场**——
+     * 一个测试留下的活 Boss 会在后面每一批里继续 tick。本轮实测撞到的后果：
+     * 它自己被打死/掉出世界 → {@code resolveDeath} 往 level 级 KillBoard 记一刀
+     * （kill-path 的"增量 +1"打成 +2，实测两轮复现）。
+     * 已移除的实体传进来也无妨，{@code discard()} 自己会跳过。
+     */
+    private static void succeedClean(GameTestHelper helper, ColossusBossEntity... bosses) {
+        for (ColossusBossEntity b : bosses) {
+            if (b != null && !b.isRemoved()) b.discard();
+        }
+        helper.succeed();
+    }
+
+    /**
      * 击杀路径全链回归（v0.2 P0 的防重现桩）：
      * 致死伤害 → 死亡演出(100t) + 原版死亡序列(20t) → 实体必须真的被移除、
      * KillBoard 必须记到首杀。P0 症状=击杀后 Boss 变不移除的 1 血雕像。
@@ -53,7 +91,7 @@ public class ColossusGameTests {
             helper.assertTrue(board.killCount(ExampleColossus.BOSS_ID) == killsBefore + 1,
                     "KillBoard 击杀计数应 +1，实际 " + board.killCount(ExampleColossus.BOSS_ID)
                             + "（开局 " + killsBefore + "）");
-            helper.succeed();
+            succeedClean(helper, boss);
         });
     }
 
@@ -96,7 +134,7 @@ public class ColossusGameTests {
             float fullLoss = before - boss.getHealth();
             helper.assertTrue(fullLoss > 8f,
                     "碎壳后同额伤害应接近全额落血，实际 " + fullLoss);
-            helper.succeed();
+            succeedClean(helper, boss);
         });
     }
 
@@ -135,7 +173,7 @@ public class ColossusGameTests {
                             "封路位 " + pos + " 必须还原为空气，实际 "
                                     + helper.getLevel().getBlockState(pos).getBlock());
                 }
-                helper.succeed();
+                succeedClean(helper, boss);
             });
         });
     }
@@ -182,16 +220,63 @@ public class ColossusGameTests {
                 helper.assertTrue(key.equals(back.get(0).memberKey()),
                         "补回来的那具必须仍挂同一个 key（key 由定义注入，换人不能换身份）");
 
-                boss.hurt(boss.damageSources().playerAttack(mock), 10_000f);
-                helper.runAfterDelay(180, () -> {
-                    helper.assertTrue(boss.isRemoved(), "Boss 应已结算移除");
-                    helper.assertTrue(sentriesAround(helper, boss).isEmpty(),
-                            "队长倒下后成员必须收摊（还杵着=打完还在被触手抽）");
-                    // 这条才是"排期关掉"的判别式（审查轮 5 P2-5a：原先等 140t 数实体是恒真断言——
-                    // 那时 Boss 已 isRemoved，squad.tick 整个停摆，删掉 leaderDown 门也照样绿）
+                // === 收摊门（leaderDown）判别式 ===
+                // 轮 5 P2-5a 判过"等 140t 数实体"是恒真断言（Boss 已 isRemoved，squad.tick 停摆）；
+                // 轮 7 又把断言换成 respawnPending()==0，那也问错了问题（倒下**之前**那次正常击破
+                // 本来就该有排期）。这里改成先造出一条真实在途排期，再让队长倒下，看它是否被撤单——
+                // 前置条件（pending==1）让"撤单"这一步真的有东西可撤。
+                // 伤害取 100 而不是 10000：成员受击有 1/4 转发本体（ExampleSentry.damageForwardRatio），
+                // 一万下去队长先死，撤单先于排期发生，下面的 pending==1 前置条件就红了。
+                // 成员 60 血 × 直击倍率 1.5 → 100 足够击破，转发只有 25。
+                back.get(0).hurt(boss.damageSources().playerAttack(mock), 100f); // 击破现役成员
+                helper.assertTrue(boss.squad().respawnPending() == 1,
+                        "成员被击破应排上一次重生（在途 " + boss.squad().respawnPending()
+                                + " 条＝前置条件不成立，后面的撤单断言就是空转）");
+                int pendingBefore = boss.squad().respawnPending();
+
+                boss.hurt(boss.damageSources().playerAttack(mock), 10_000f); // 队长倒下（演出 100t）
+                helper.runAfterDelay(5, () -> {
                     helper.assertTrue(boss.squad().respawnPending() == 0,
-                            "收摊引起的成员之死不得再排重生，实际在途 " + boss.squad().respawnPending() + " 条");
-                    helper.succeed();
+                            "队长倒下即撤单：倒下前在途 " + pendingBefore + " 条，现在仍剩 "
+                                    + boss.squad().respawnPending() + " 条（＝leaderDown 只挡新排期、"
+                                    + "不撤在途，演出到点会补出一具收不到广播的成员）");
+                    helper.assertFalse(boss.isRemoved(),
+                            "本桩靠「演出仍在 tick」才有判别力，此时就 isRemoved 说明时间线不对");
+                });
+                helper.runAfterDelay(140, () -> {
+                    // respawnDelay=100 落在 100t 演出窗口内：没撤单就一定到点补员（这条不是恒真）
+                    helper.assertTrue(sentriesAround(helper, boss).isEmpty(),
+                            "到点不该再长回成员（在途排期没撤，演出中就会补出一具打人的）");
+                    helper.assertTrue(boss.isRemoved(), "Boss 应已结算移除");
+
+                    // === 收摊广播判别式（轮 7 补测）===
+                    // 上面的时序把现役成员先杀了，"队长倒下时<b>活着</b>的成员必须自己收摊"
+                    // 这条就失去观察者——旧桩里它由 180t 后的 "sentriesAround().isEmpty()" 兼着，
+                    // 那个时点 Boss 已移除，等于没测。另起一队，在演出窗口内取判。
+                    ColossusBossEntity second = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                            new BlockPos(4, 3, 4)); // 第一具已移除，原地复用不影响判定
+                    second.hurt(second.damageSources().playerAttack(mock), 1.0f); // 点着，触发补员
+                    helper.runAfterDelay(12, () -> {
+                        helper.assertTrue(livingSentriesAround(helper, second).size() == 1,
+                                "第二队应已补出「活着的」成员（没有活成员可收摊＝这条分支没被观察到）");
+                        second.hurt(second.damageSources().playerAttack(mock), 10_000f);
+                        helper.runAfterDelay(5, () -> {
+                            // 队长血被钉在 1.0 且 isAlive() 仍为 true → 成员照旧跟锚点，
+                            // 没有广播它就一定还活着；此刻未 isRemoved，判据不空转。
+                            // 口径取"活着"而不是"存在"：广播生效后成员 die() 的尸体还要 20t 才消失，
+                            // 按"名单为空"判会假红（首跑就红在这里）——见 livingSentriesAround 的说明。
+                            int alive = livingSentriesAround(helper, second).size();
+                            int present = sentriesAround(helper, second).size();
+                            helper.assertTrue(alive == 0,
+                                    "队长倒下即收摊：演出中场上仍有 " + alive + " 具活成员"
+                                            + "（在场总数 " + present + "，尸体留在死亡动画里是预期的）");
+                            helper.assertFalse(second.isRemoved(), "时间线核对：演出应仍未结束");
+                            // 清场（轮 7 实测教训）：这具是为"收摊广播"临时立的，留着它退场＝
+                            // 留一具仍在死亡演出里的 Boss 给后续批次——它照样 recordKill（把别的桩的
+                            // "击杀 +1"变成 +2），演出中的自动选招还会打伤邻近结构的实体。
+                            succeedClean(helper, boss, second);
+                        });
+                    });
                 });
             });
         });
@@ -215,8 +300,24 @@ public class ColossusGameTests {
     }
 
     /**
-     * 出招序号回归（GL4 一手源码取证点名的事故形）：**连放同一招**时招式身份与
-     * {@code ATTACK_INDEX} 都不变，只有 {@code attackSequence()} 递增——
+     * 场上还<b>活着</b>的、属于这个 Boss 的示范成员（收摊判定专用）。
+     *
+     * <p>不能直接复用 {@link #sentriesAround} 的"实体不存在"口径：成员 {@code die()} 之后还要走完
+     * 死亡动画才 {@code isRemoved}，那 20t 里它仍在按类遍历的名单里——首跑就红在这一条上
+     * （广播确实发了、血也确实清零了，只是尸体还没消失）。收摊的真实语义是 {@code !isAlive()}。
+     */
+    private static java.util.List<com.klze.colossus.testboss.ExampleSentry> livingSentriesAround(
+            GameTestHelper helper, ColossusBossEntity boss) {
+        java.util.List<com.klze.colossus.testboss.ExampleSentry> out = new java.util.ArrayList<>();
+        for (com.klze.colossus.testboss.ExampleSentry s : sentriesAround(helper, boss)) {
+            if (s.isAlive()) out.add(s);
+        }
+        return out;
+    }
+
+    /**
+     * 出招序号回归（GL4 一手源码取证点名的事故形）：**连放同一招**时招式 id、动画名与
+     * {@code ATTACK_DURATION} 都不变，只有 {@code attackSequence()} 递增——
      * 客户端若拿 index 当"新一次施法"的判据，第二下就不会重启动画（原地卡住）。
      * 顺带钉住 {@code forceMove} 的不可打断闸门。
      */
@@ -250,7 +351,7 @@ public class ColossusGameTests {
                                     + boss.attackSequence());
                     helper.assertTrue(roar.equals(boss.currentAttack().id()),
                             "而招式身份不变——正说明「只有序号能区分两次施法」");
-                    helper.succeed();
+                    succeedClean(helper, boss);
                     return;
                 }
                 if (++attempts > 40) {
@@ -298,7 +399,7 @@ public class ColossusGameTests {
             helper.assertTrue(boss.getHealth() < hpBefore,
                     "溢出伤害必须落本体，实际仍为 " + boss.getHealth());
             helper.assertTrue(boss.isAlive() && !boss.isDeathPending(), "这一刀不该致死");
-            helper.succeed();
+            succeedClean(helper, boss);
         });
     }
 
@@ -387,7 +488,7 @@ public class ColossusGameTests {
         helper.runAfterDelay(30, () -> {
             helper.assertTrue(cow.getHealth() < hpBefore || cow.isRemoved(),
                     "JSON 招的判定帧必须真落伤（牛 " + cow.getHealth() + "/" + hpBefore + "）");
-            helper.succeed();
+            succeedClean(helper, boss);
         });
     }
 
@@ -401,26 +502,60 @@ public class ColossusGameTests {
         ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
                 new BlockPos(4, 3, 4));
         var cow = helper.spawn(net.minecraft.world.entity.EntityType.COW, new BlockPos(4, 3, 4));
-        var zone = com.klze.colossus.env.TelegraphZone.damageCircle(boss, 0.0, 0.0, 6.0, 60, 0xFF4040);
-        float hpBefore = cow.getHealth();
+        // 区域直接以牛为心：本桩测的是"队列能否穿过存档、何时到期、结算几次"，
+        // 不是几何判定（首跑用 damageCircle，Boss 下坠导致圈抬高、牛落在圈外 → 假红）
+        var zone = new com.klze.colossus.env.TelegraphZone(cow.getX(), cow.getY() + 1.0, cow.getZ(),
+                6.0, 6.0, 60, 0xFF4040, "dust"); // 60t 里牛会下落，盒子要给足厚度（首跑 1.5 厚 → 掉出圈外假红）
+        final float hpBefore = cow.getHealth();
 
         boss.scheduleWork(60, com.klze.colossus.env.ZoneWork.KIND,
                 com.klze.colossus.env.ZoneWork.encode(zone,
                         new com.klze.colossus.env.ZoneBurst(4.0f, 0.0f, 0)));
-        helper.assertTrue(boss.pendingWorkCount() == 1, "排完应当有一条在途待办");
+        // 顺带把两条弃单分支排进来：未知种类、残缺载荷——都只在 drain/load 之后才走得到
+        boss.scheduleWork(60, "colossus:no_such_kind", new net.minecraft.nbt.CompoundTag());
+        boss.scheduleWork(60, com.klze.colossus.env.ZoneWork.KIND, new net.minecraft.nbt.CompoundTag());
+        // 第四条：与 zone 同一条时间线的**隔离计数器**（落在 Boss 自己的 persistentData 上）。
+        // "何时到期""落几次"这两问只认这个观测面——牛是世界级实体，会被别的桩的残兵碰脏
+        // （轮 7 实测：同一份代码两轮分别掉 8.0 / 10.0 点，"恰好 4 点"这条判据本身不成立）。
+        boss.scheduleWork(60, PING_KIND, new net.minecraft.nbt.CompoundTag());
+        helper.assertTrue(boss.pendingWorkCount() == 4, "排四条应得四条在途待办");
 
         var tag = new net.minecraft.nbt.CompoundTag();
         boss.saveWithoutId(tag);
+        // 归因（轮 7 P2-3）：原实例必须退场，否则"牛掉血"可能出自它，断言就不是只证读档那条路
+        boss.discard();
         ColossusBossEntity revived = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
                 new BlockPos(4, 3, 4));
         revived.load(tag);
-        helper.assertTrue(revived.pendingWorkCount() == 1,
-                "读档后队列必须还在（实际 " + revived.pendingWorkCount() + " 条＝没持久化）");
+        helper.assertTrue(revived.pendingWorkCount() == 4,
+                "读档后队列必须原样还在（实际 " + revived.pendingWorkCount() + " 条）");
+
+        helper.runAfterDelay(10, () -> {
+            // 时刻判据：旧形态按 tickCount 计数，重载后"还剩 50t"会立刻变成"已过期"——
+            // 只断"结没结算"抓不到它（轮 7 变异表第一行）
+            helper.assertTrue(pingCount(revived) == 0,
+                    "+10t 时这条待办必须还没落（到期时刻仍是未来；现在就落＝时钟换错了）");
+        });
         helper.runAfterDelay(75, () -> {
-            helper.assertTrue(cow.getHealth() < hpBefore || cow.isRemoved(),
-                    "到点后圈内的实体必须吃到这一发（牛 " + cow.getHealth() + "/" + hpBefore + "）");
-            helper.assertTrue(revived.pendingWorkCount() == 0, "结算完队列要排空");
-            helper.succeed();
+            helper.assertTrue(revived.pendingWorkCount() == 0,
+                    "四条待办（含未知种类与残缺载荷两条弃单）都该排空，实际剩 "
+                            + revived.pendingWorkCount() + "（剩 4＝drainWork 没跑到这个实例）");
+            helper.assertTrue(pingCount(revived) == 1,
+                    "到点必须恰好落一次，实际 " + pingCount(revived) + " 次（0＝没落，2+＝同一发结算多次）");
+            // 伤害落点降到"至少一发"：它只证 zone 真的结算到了实体上，
+            // 精确次数由上面那条计数器负责（牛可能挨别桩的刀，也可能被这一发打死）
+            float lost = hpBefore - (cow.isRemoved() ? 0.0f : cow.getHealth());
+            net.minecraft.world.damagesource.DamageSource last = cow.getLastDamageSource();
+            helper.assertTrue(lost >= 4.0f,
+                    "到点至少该吃到一发 4 点，实际掉 " + lost
+                            + "（0＝没落/没打中；最后一击 msgId="
+                            + (last == null ? "无" : last.getMsgId())
+                            + " 直接源=" + (last == null || last.getDirectEntity() == null ? "无"
+                                    : last.getDirectEntity().getEncodeId() + "@"
+                                            + last.getDirectEntity().getStringUUID()) + "）");
+            helper.assertTrue(revived.isAlive(), "未知/残缺 handler 不该把 Boss 弄崩");
+            // 收尾清场（轮 7）：退场时留一只还活着、还会选招的 Boss，就是给邻近结构留一个射手
+            succeedClean(helper, boss, revived);
         });
     }
 

@@ -71,7 +71,7 @@ import java.util.UUID;
  *   <li>血条 renderType 旁路、音乐幂等开关、类型化客户端事件。</li>
  * </ul>
  *
- * <p>同步契约：{@code PHASE / ATTACK_INDEX / ATTACK_TICK / DEATH_TICK / ACTIVATED}
+ * <p>同步契约：{@code PHASE / ATTACK_ID / ATTACK_ANIM / ATTACK_DURATION / ATTACK_TICK / ATTACK_SEQ / DEATH_TICK / ACTIVATED}
  * 全走 entityData——战斗状态零自定义包。
  */
 public abstract class ColossusBossEntity extends Monster {
@@ -92,20 +92,22 @@ public abstract class ColossusBossEntity extends Monster {
      */
     private static final EntityDataAccessor<String> DATA_ATTACK_ID =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.STRING);
+    /**
+     * 当前招式的<b>动画名</b>（同步）。轮 7 P1-2：这个串必须由服务端直接下发，
+     * 不能让客户端从 id 派生——Java DSL 的默认 animName 是 id 的 <b>path</b>（"smash"），
+     * 派生出来的是 "colossus:smash"，同一招双端两个键，GL 侧查不到就静默 stop。
+     */
+    private static final EntityDataAccessor<String> DATA_ATTACK_ANIM =
+            SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.STRING);
     /** 当前招式时长（同步）。客户端算进度比例不再需要查表——表可能是空的。 */
     private static final EntityDataAccessor<Integer> DATA_ATTACK_DURATION =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<Integer> DATA_ATTACK_TICK =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT);
     /**
-     * 出招序号（每次 {@code beginAttack} +1，**只增不清零**）。
-     *
-     * <p>为什么要有它：动画侧要能分辨"新一次施法"，而 {@code DATA_ATTACK_INDEX} 在
-     * <b>连续放同一招</b>时不变 → 靠"值变了没"驱动的客户端不会重启动画，第二下原地卡住。
-     * 这是 GL4 取证（清单 2 多部件段）点名的同款事故：「同值不广播，布尔旗标在多人下会漏第二次触发」，
-     * 正解是<b>递增序号</b>。OrdertoCook 的 {@code ACTION_STATE} 与 dumbcat 的 {@code HURT_SEQ} 都是这个形状。
+     * 出招序号（每次 {@code beginAttack} +1，**只增不清零**）。详见 {@link #attackSequence()}：
+     * 招式 id/动画名在"连放同一招"时都不变，只有这个递增序号能告诉客户端"这是一次新的施法"。
      */
-    /** 出招序号见下面 {@link #attackSequence()} 的说明。 */
     private static final EntityDataAccessor<Integer> DATA_ATTACK_SEQ =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.INT);
     private static final EntityDataAccessor<Integer> DATA_DEATH_TICK =
@@ -143,7 +145,15 @@ public abstract class ColossusBossEntity extends Monster {
      * 旧形态存的是 {@code Runnable} 且按 {@code tickCount} 计数——既写不进 NBT，
      * 重载后又把"还剩几 tick"当成"从 0 起第几 tick"，telegraph 要么凭空消失要么立刻结算。
      */
-    private final java.util.Deque<DeferredWork> workQueue = new java.util.ArrayDeque<>();
+    /**
+     * 按<b>到期时刻</b>排序（轮 7 P2-1）：{@code ArrayDeque} 只保证插入序，
+     * "先排 60t 的长延后接一排 5t 的短延"时短的那发会被长的头阻塞。
+     */
+    private final java.util.PriorityQueue<DeferredWork> workQueue =
+            new java.util.PriorityQueue<>(8, java.util.Comparator.comparingLong(DeferredWork::dueGameTime));
+
+    /** 在途待办上限（本仓别处都封了条数，这里不封就是高频 telegraph 把 NBT 越写越大）。 */
+    private static final int MAX_PENDING_WORK = 32;
 
     /** 一条待办；{@code kind} 必须能在 {@link #DEFERRED_WORKS} 里查到。 */
     public record DeferredWork(long dueGameTime, String kind, CompoundTag data) {}
@@ -168,6 +178,11 @@ public abstract class ColossusBossEntity extends Monster {
 
     /** N tick 后在服务端 aiStep 里执行一次（实体先消失则不执行）。kind 见 {@link #registerDeferredWork}。 */
     public void scheduleWork(int delayTicks, String kind, CompoundTag data) {
+        if (this.workQueue.size() >= MAX_PENDING_WORK) {
+            Colossus.LOGGER.warn("boss {} deferred-work queue full ({} entries) — refusing new {}",
+                    this.getBossId(), this.workQueue.size(), kind);
+            return;
+        }
         this.workQueue.add(new DeferredWork(this.level().getGameTime() + Math.max(1, delayTicks), kind, data));
     }
 
@@ -178,8 +193,8 @@ public abstract class ColossusBossEntity extends Monster {
 
     private void drainWork() {
         long now = this.level().getGameTime();
-        while (!this.workQueue.isEmpty() && this.workQueue.peekFirst().dueGameTime() <= now) {
-            DeferredWork w = this.workQueue.pollFirst();
+        while (!this.workQueue.isEmpty() && this.workQueue.peek().dueGameTime() <= now) {
+            DeferredWork w = this.workQueue.poll();
             var handler = DEFERRED_WORKS.get(w.kind());
             if (handler == null) {
                 // 种类被删（mod 更新后）：丢弃并留痕，不炸存档
@@ -187,7 +202,13 @@ public abstract class ColossusBossEntity extends Monster {
                         w.kind(), this.getBossId());
                 continue;
             }
-            handler.accept(this, w.data());
+            try {
+                handler.accept(this, w.data());
+            } catch (Throwable t) {
+                // registerDeferredWork 是开放给下游的扩展点：一个坏 handler 不能把 aiStep 炸成
+                // 持久 Boss 的崩溃循环（与 ColossusAnims 的 fire* 同一姿态）。待办已出队，不重试。
+                Colossus.LOGGER.warn("deferred work {} threw on boss {} — dropped", w.kind(), this.getBossId(), t);
+            }
         }
     }
 
@@ -470,6 +491,7 @@ public abstract class ColossusBossEntity extends Monster {
         this.contacts.clear(); // 每次出招是全新接触集（DBE 窗口语义）
         this.attackMove = move; // 服务端权威：中途 /reload 换表也不影响在播的这招（轮6 P3-3）
         this.entityData.set(DATA_ATTACK_ID, move.id().toString());
+        this.entityData.set(DATA_ATTACK_ANIM, move.animName());
         this.entityData.set(DATA_ATTACK_DURATION, move.duration());
         this.entityData.set(DATA_ATTACK_TICK, 0);
         this.entityData.set(DATA_ATTACK_SEQ, this.entityData.get(DATA_ATTACK_SEQ) + 1); // 连放同招也要能重启动画
@@ -495,6 +517,7 @@ public abstract class ColossusBossEntity extends Monster {
     void syncAttackNone() {
         this.attackMove = null;
         this.entityData.set(DATA_ATTACK_ID, "");
+        this.entityData.set(DATA_ATTACK_ANIM, "");
         this.entityData.set(DATA_ATTACK_DURATION, 0);
         this.entityData.set(DATA_ATTACK_TICK, 0);
     }
@@ -523,12 +546,18 @@ public abstract class ColossusBossEntity extends Monster {
         return m != null ? m.id().toString() : this.entityData.get(DATA_ATTACK_ID);
     }
 
-    /** 招式动画名（同步的原版形态）：客户端适配器按名播，不必持有招式表。 */
+    /**
+     * 招式动画名：直接读服务端下发的同步串（空串＝当前无招）。
+     * 客户端适配器与模型都该用这个，而不是 {@link #currentAttack()}——后者是服务端权威对象，客户端恒 null。
+     */
     public String attackAnimName() {
-        var m = this.currentAttack();
-        if (m != null) return m.animName();
-        String id = this.entityData.get(DATA_ATTACK_ID);
-        return id.isEmpty() ? "" : id;
+        return this.currentAttack() != null ? this.currentAttack().animName()
+                : this.entityData.get(DATA_ATTACK_ANIM);
+    }
+
+    /** 是否正在施法（双端都能问，客户端不依赖招式表）。 */
+    public boolean isAttacking() {
+        return !this.entityData.get(DATA_ATTACK_ANIM).isEmpty();
     }
 
     /** 当前招式时长（同步，客户端可直接算进度）。 */
@@ -773,9 +802,14 @@ public abstract class ColossusBossEntity extends Monster {
     /** 服务端死亡挂起标记（transient，不上网络）——客户端死亡态判据用 {@code deathTick()>0}。 */
     public boolean isDeathPending() { return this.deathPending; }
 
-    /** 演出开场副作用：血条清零并隐藏/停音乐/清延迟队列（渲染层读 DEATH_TICK）。 */
+    /** 演出开场副作用：血条清零并隐藏/停音乐/清延迟队列/成员收摊（渲染层读 DEATH_TICK）。 */
     void onDeathSequenceStart() {
         this.workQueue.clear(); // 死亡后不再结算旧的 telegraph/延迟动作（审查 P2）
+        // squad 收摊放在<b>演出开场</b>而不是结算处：默认演出 100t 里 SquadManager.tick 照常跑，
+        // 等 resolveDeath 才撤单，中途到点的那具成员就补出来了，而且它收不到收摊广播（审查轮 7 P1-4）。
+        if (!this.squad().defs().isEmpty() && this.level() instanceof ServerLevel server) {
+            this.squad().notifyLeaderDeath(server);
+        }
         if (this.bossEvent != null) {
             this.bossEvent.setProgress(0f);
             this.bossEvent.setVisible(false);
@@ -808,7 +842,7 @@ public abstract class ColossusBossEntity extends Monster {
             deliverLoot(server);
             var arena = this.arena();
             if (arena != null && arena.isActive()) arena.victory(server); // 胜利解封（第七批）
-            if (!this.squad().defs().isEmpty()) this.squad().notifyLeaderDeath(server); // 收摊（第九批）
+            // squad 收摊不在这里——已提前到演出开场（onDeathSequenceStart），此处只剩"确认没人留在排期里"
         }
         // deathPending 保持 true：原版死亡序列（deathTime→remove）期间仍拒绝一切伤害
         this.setHealth(0.0f);
@@ -1130,6 +1164,7 @@ public abstract class ColossusBossEntity extends Monster {
         this.entityData.define(DATA_PHASE, 0);
         this.entityData.define(DATA_ATTACK_ID, "");
         this.entityData.define(DATA_ATTACK_DURATION, 0);
+        this.entityData.define(DATA_ATTACK_ANIM, "");
         this.entityData.define(DATA_ATTACK_TICK, 0);
         this.entityData.define(DATA_ATTACK_SEQ, 0);
         this.entityData.define(DATA_SHIELD, 0.0f);
@@ -1247,6 +1282,14 @@ public abstract class ColossusBossEntity extends Monster {
                 if (!(t instanceof CompoundTag one)) continue;
                 long due = one.getLong("due");
                 if (due <= 0L || one.getString("kind").isEmpty()) continue; // 残缺条目：丢掉，别在 tick 里炸
+                if (due <= this.level().getGameTime()) {
+                    // 卸载期间 gameTime 照走 → 这一发的"预警窗口"已经过去了。
+                    // 重载后直接落 = Boss 站着不动、地上没圈却挨一刀（tell 撒谎），所以宁可不落。
+                    // 帧时间线整体不入 NBT 是 v0.3 的账（DESIGN §3），这里先把不对称的尖角磨掉。
+                    Colossus.LOGGER.warn("boss {} dropped {} overdue deferred works on load",
+                            this.getBossId(), this.pendingWorkCount() + 1);
+                    continue;
+                }
                 this.workQueue.add(new DeferredWork(due, one.getString("kind"), one.getCompound("data")));
             }
         }

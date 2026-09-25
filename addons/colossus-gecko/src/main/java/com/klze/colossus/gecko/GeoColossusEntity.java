@@ -1,7 +1,6 @@
 package com.klze.colossus.gecko;
 
 import com.klze.colossus.entity.ColossusBossEntity;
-import com.klze.colossus.move.MoveDef;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.level.Level;
 import software.bernie.geckolib.animatable.GeoEntity;
@@ -43,8 +42,9 @@ public abstract class GeoColossusEntity extends ColossusBossEntity implements Ge
     // ==================== 内容侧只需给这三样 ====================
 
     /** 招式名 → GL 动画名（默认直接用 MoveDef.animName()，够用；要改名规则就覆写）。 */
-    protected String animForMove(MoveDef move) {
-        return move.animName();
+    /** 改名规则钩子（默认用服务端下发的 animName，即 {@code MoveDef.animName()}）。 */
+    protected String animForMove(String syncedAnimName) {
+        return syncedAnimName;
     }
 
     /** 待机/移动/死亡三条环境动画名。 */
@@ -79,8 +79,10 @@ public abstract class GeoColossusEntity extends ColossusBossEntity implements Ge
             this.lastSeenSeq = this.attackSequence();
             return state.setAndContinue(raw(this.deathAnim()));
         }
-        MoveDef move = this.currentAttack();
-        if (move == null) {
+        // 轮 7 P1-1：currentAttack() 是服务端权威对象，客户端恒 null——而控制器跑在渲染路径上，
+        // 拿它当门会让出招动画永不播。改读同步串 attackAnimName()（空串＝当前无招）。
+        String anim = this.attackAnimName();
+        if (anim.isEmpty()) {
             this.lastSeenSeq = this.attackSequence();
             return PlayState.STOP;
         }
@@ -90,11 +92,11 @@ public abstract class GeoColossusEntity extends ColossusBossEntity implements Ge
             this.lastSeenSeq = seq;
             state.getController().forceAnimationReset();
         }
-        return state.setAndContinue(raw(animForMove(move)));
+        return state.setAndContinue(raw(animForMove(anim))); // 服务端下发的动画名，双端同一个键
     }
 
     private PlayState movementController(AnimationState<GeoColossusEntity> state) {
-        if (this.currentAttack() != null || this.deathTick() > 0) return PlayState.STOP;
+        if (this.isAttacking() || this.deathTick() > 0) return PlayState.STOP;
         boolean moving = this.getDeltaMovement().horizontalDistanceSqr() > 1.0E-4;
         return state.setAndContinue(raw(moving ? this.walkAnim() : this.idleAnim()));
     }

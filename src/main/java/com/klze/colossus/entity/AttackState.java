@@ -7,7 +7,7 @@ import com.klze.colossus.state.State;
 
 /**
  * 招式执行状态：AttackState 是 MoveDef 的运行时壳。
- * onStart 写同步帧（ATTACK_INDEX）并建帧表执行器，每 tick advance(tick) 触发帧表，
+ * onStart 写同步帧（ATTACK_ID / ATTACK_ANIM / ATTACK_DURATION / SEQ）并建帧表执行器，每 tick advance(tick) 触发帧表，
  * duration 用尽即 END。全程不可打断（"转段即技能、技能即状态"——Cataclysm 验证过的语义）。
  */
 public final class AttackState implements State<ColossusBossEntity> {

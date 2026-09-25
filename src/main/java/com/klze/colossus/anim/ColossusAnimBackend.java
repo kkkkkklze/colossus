@@ -26,7 +26,15 @@ public interface ColossusAnimBackend {
         @Override public void onAttackStart(ColossusBossEntity boss, MoveDef move) {}
     };
 
-    /** 出招瞬间（框架已写好 ATTACK_INDEX 同步数据）。GL4 形实现 = {@code boss.triggerAnim("main", move.animName())}。 */
+    /**
+     * 出招瞬间（框架此刻已写好 ATTACK_ID/ATTACK_ANIM/ATTACK_DURATION/ATTACK_SEQ 四件同步数据）。
+     *
+     * <p>GL4 形实现有前提：{@code triggerAnim} 走的是 triggerable 通道，**动画必须先以
+     * triggerableAnim 登记**，否则 {@code AnimationController} 查不到名字会静默返回 false
+     * （一声不响地不播）。所以推荐档位是 (c)：客户端控制器 predicate 读
+     * {@code attackSequence()/attackAnimName()}（addons/colossus-gecko 就是这么写的），
+     * 本回调只留给"服务端点名"的实现用。
+     */
     void onAttackStart(ColossusBossEntity boss, MoveDef move);
 
     /** 阶段过场开始（到点换相位动画/免伤姿态）。 */

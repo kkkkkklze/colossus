@@ -27,6 +27,18 @@ public final class RespawnSchedule {
         return dueAt.containsKey(key);
     }
 
+    /**
+     * 全部撤单（队长倒下时用）。
+     *
+     * <p>只关掉"以后还能不能排"是不够的：{@code leaderDown} 门管不到<b>已经在队列里</b>的那几条，
+     * 而队长死亡演出默认 100t 内 {@link SquadManager#tick} 照常跑——到点就补员，
+     * 补出来的那具<b>收不到</b> {@code onLeaderDefeated} 广播（广播已在演出开场发完），
+     * 于是变成"Boss 死了、成员在尸体边上打人"。审查轮 7 P1-4。
+     */
+    public void cancelAll() {
+        dueAt.clear();
+    }
+
     /** 到点条目全部出队。 */
     public List<String> consumeDue(long gameTime) {
         List<String> due = new ArrayList<>();

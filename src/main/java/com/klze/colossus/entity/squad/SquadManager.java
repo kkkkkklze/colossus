@@ -189,14 +189,19 @@ public final class SquadManager {
     private boolean leaderDown;
 
     /**
-     * 队长结算死亡时调用：广播收摊 + 关掉重生排期。
+     * 队长倒下：撤掉在途重生排期 + 广播收摊。<b>死亡演出开场就调</b>（
+     * {@code ColossusBossEntity.onDeathSequenceStart}），不等 {@code resolveDeath}——
+     * 演出默认 100t 里 {@link #tick} 还在跑，晚一步就有一次到点补员漏出来。
      *
      * <p>走的是<b>身份账</b>而不是扫场，所以"未加载的成员"这一格照 v7 的口径留给时间：
      * 它没收到广播，但队长已经从世界上消失，下次它 tick 时 {@code resolveLeader} 解析不到人，
      * 就是个不再排期的普通怪（{@link ColossusSquadMemberEntity#followsLeaderAnchor()} 自动失效）。
+     *
+     * <p>可重入：读档续上死亡流程会再走一次演出开场，届时成员已死/已销账，广播与撤单都是空转。
      */
     public void notifyLeaderDeath(ServerLevel level) {
         leaderDown = true;
+        respawn.cancelAll(); // 先撤单，再广播——顺序反了会让到点条目在这一 tick 里补出来
         for (ColossusSquadMember m : iterateMembers(level)) {
             m.onLeaderDefeated();
         }
