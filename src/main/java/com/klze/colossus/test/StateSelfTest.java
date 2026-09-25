@@ -648,6 +648,26 @@ public final class StateSelfTest {
                 !com.klze.colossus.env.TelegraphZone.hasRequiredKeys(partial)
                         && com.klze.colossus.env.TelegraphZone.hasRequiredKeys(
                                 new com.klze.colossus.env.TelegraphZone(1, 2, 3, 4, 5, 6, 7, "ring").toTag()));
+        // 要紧的那一半：**结算**走的是 ZoneWork 的载荷，不是投影。上一批我只补了投影侧，
+        // 于是"看不见的圈照样落伤"这个洞在原处还开着（轮 18 P3-3）。判据抽成纯函数后才能在这里跑红。
+        var okPayload = com.klze.colossus.env.ZoneWork.encode(
+                new com.klze.colossus.env.TelegraphZone(1, 2, 3, 4, 1, 20, 0, "dust"),
+                new com.klze.colossus.env.ZoneBurst(3.0f, 0.0f, 0));
+        var noZone = new net.minecraft.nbt.CompoundTag();
+        noZone.put("burst", new com.klze.colossus.env.ZoneBurst(3.0f, 0.0f, 0).toTag());
+        var noBurst = new net.minecraft.nbt.CompoundTag();
+        noBurst.put("zone", okPayload.getCompound("zone").copy());
+        var halfZone = new net.minecraft.nbt.CompoundTag();
+        var stripped = okPayload.getCompound("zone").copy();
+        stripped.remove("cz"); // 截断的存档最常见形态：少一个键，读回来是 0 而不是异常
+        halfZone.put("zone", stripped);
+        halfZone.put("burst", okPayload.getCompound("burst").copy());
+        check("settlement refuses a payload whose zone tag is incomplete (and accepts a full one)",
+                com.klze.colossus.env.ZoneWork.settleRejectReason(okPayload) == null
+                        && "no zone payload".equals(com.klze.colossus.env.ZoneWork.settleRejectReason(noZone))
+                        && "no burst payload".equals(com.klze.colossus.env.ZoneWork.settleRejectReason(noBurst))
+                        && "incomplete zone tag".equals(
+                                com.klze.colossus.env.ZoneWork.settleRejectReason(halfZone)));
 
         var burst = new com.klze.colossus.env.ZoneBurst(6.0f, 0.5f, 40)
                 .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.0f, 0));

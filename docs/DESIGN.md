@@ -840,7 +840,7 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > 五处措辞全部改正，并加一条纪律：**凡写"上一批是 X"先跑 `git log -S <标识符> --all`**，命中只有本提交就不许那样写。
 > ✅ 其余处置：DSL 的两条 warn 加 `env/OncePerKey`（有界 LRU）latch，自检钉住"同键只响一次 + 500 键冲刷后仍 ≤64"；
 > 偏移判据统一成 `hypot`（原先逐分量 ⇒ `(2048,2048)` 实际 2896.3）且钳位按比例缩以**保方向**；
-> `TelegraphView.fromTag` 要求几何齐件（`hasRequiredKeys`，否则"看不见的圈照样落伤"）；
+> `TelegraphView.fromTag` 与 **`ZoneWork.settleRejectReason`** 两侧都要求几何齐件（`hasRequiredKeys`）——伤害走的是待办那份载荷，投影丢了不等于结算丢了，只补投影侧＝洞还在原处开着；判据抽成纯函数后自检钉住 full/noZone/noBurst/incomplete 四档；
 > `remainingTicks` 堵住 `(int)(end-start)` 在 `2^32-1` 时截成负数那条；`"spark"` 升成 `SPARK_VISUAL` 公开词表项；
 > `telegraphCap()` 的日志点名"cap 1 ⇒ 只有第一发带预警的招会落"。
 > ✅ §6.3/§2.4 五处数字重算：`absoluteMaxSize` 与 `MAX_CENTER_COORDINATE` **相等**（先前写"差 16 格"是把科学
@@ -852,5 +852,5 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > `ZoneWork` 扫场成本的独立上限、状态栈快照、跨招关系三件原语（v13 新线索：韧性/打断这条轴在库里几乎只有
 > 一个样本，`[首领崛起]` 用"招式自报层数 + 两级分岔"，见 `深挖__BOSS引擎调研v13__韧性打断与破势取证.md`）
 > 与 `DATA_DEATH_TICK`、许可证仍 ARR。
-> 验证：build（`-Pgecko`）+ 自检 **124/124**（118→124）+ audit **14** + `runGameTestServer`
+> 验证：build（`-Pgecko`）+ 自检 **125/125**（118→125，站点 77+41 → 84+41）+ audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。
