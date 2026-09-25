@@ -106,8 +106,10 @@ protected void registerMoves(MoveSetBuilder m) {
 第二条通道是 **`DATA_TELEGRAPHS`（`EntityDataSerializers.COMPOUND_TAG`）**——在途危险区的投影，
 形态 `{views:[{cx,cy,cz,rXZ,rY,warn,color,visual,id,start,end}]}`，`start/end` 是**绝对 gameTime**（第二十四批改的根据：
 vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份全量快照，中途进场/重进世界/存档重载三条都不用写补包代码）。
-它不是"随便一个标签"，载荷有硬界：**一条 view 约 140 B，条数上限 `HARD_MAX_TELEGRAPHS = 32` ⇒ 一轮全量广播 ≤ ~4.5 KiB**，
-离 `FriendlyByteBuf#readNbt` 的 2 MiB accounter 差三个数量级；默认同时在地上的条数是 `MAX_ACTIVE_TELEGRAPHS = 8`，
+它不是"随便一个标签"，载荷有硬界：**一条 view 按 wire 口径约 148 B（11 个键，每键 1 B 类型 + 2 B 名长 + 名 + payload；
+轮 18 P3-5 把我先前那句"140 B"按实际键表重算过），`HARD_MAX_TELEGRAPHS = 32` 条 ⇒ 一轮全量广播 ≤ ~4.7 KiB**，
+离 `FriendlyByteBuf` 的 2 MiB NBT 配额（`DEFAULT_NBT_QUOTA = 2097152`，`readNbt()` 就用它建 `NbtAccounter`）
+差 **2.6 个数量级**（443 倍；先前写"三个数量级"是四舍五入过头，轮 18 P3-5 改正）；默认同时在地上的条数是 `MAX_ACTIVE_TELEGRAPHS = 8`，
 子类按 `maxActiveTelegraphs()` 抬，抬出去的值还要过 `clampTelegraphCap()`（钳到 `1..32`，越界一次性 warn）。
 为什么下界是 1 而不是 0：`0` 会让 `size() >= cap` 恒真 ⇒ 这个 Boss **所有带预警的招一招不落**，
 而"关掉投影却仍落伤害"＝制造没预警的攻击，那比少一格容量严重得多（轮 17 设计偏差第 2 条的裁决，
@@ -177,20 +179,35 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
    |---|---|---|
    | `radiusXZ` / `radiusY` | `(0, MAX_RADIUS=256]`，NaN/≤0 回落 `1.0` | JSON：`circle_ahead.radius` 字段级拒；DSL：一次性 warn + 钳；坏存档：静默钳 |
    | `warnTicks` | `[0, MAX_WARN_TICKS=1200]`（60 s；`Integer.MAX_VALUE` 会让 `settle`/`lifetime` 双双溢出） | 同上三档 |
-   | `forward` / `side`（圈心相对 Boss 的偏移） | 有限且 `\|v\| ≤ MAX_AHEAD_OFFSET=2048` | JSON 字段级拒；DSL warn + 钳。**这是选型规则不是推导**：再远的落点该做成弹道实体，而不是贴地块 |
-   | `cx/cy/cz`（绝对圈心） | 有限且 `\|v\| ≤ MAX_CENTER_ABS`（取 vanilla `WorldBorder.MAX_CENTER_COORDINATE = 2.9999984E7`；该常量在本版本声明后无人使用，与 `ParticleEngine.MAX_PARTICLES_PER_LAYER` 同一类死常量） | 只钳不打（炸在 `readAdditionalSaveData`／渲染路径＝区块一加载就崩） |
-   | `visual` | 非空字符串；`null`/空/全空白 → `DEFAULT_VISUAL="dust"` | 判据只有 `visualOrDefault` 一份（轮 17 P3-11 之前是 `isEmpty`/`isBlank` 两套） |
+   | `forward` / `side`（圈心相对 Boss 的偏移） | 有限且 `hypot(forward,side) ≤ MAX_AHEAD_OFFSET=2048`（**按范数**，轮 18 P3-1：逐分量判会让 `(2048,2048)` 两条都合法、实际 2896.3） | JSON 字段级拒；DSL 一次性 warn + **按比例缩**（保方向） |
+   | `cx/cy/cz`（绝对圈心） | 有限且逐分量 `≤ MAX_CENTER_ABS`（取 vanilla `WorldBorder.MAX_CENTER_COORDINATE = 2.9999984E7`，与 `absoluteMaxSize = 29999984` **同值**；该常量在本版本声明后无人使用，与 `ParticleEngine.MAX_PARTICLES_PER_LAYER` 同一类死常量） | 只钳不打（炸在 `readAdditionalSaveData`／渲染路径＝区块一加载就崩） |
+   | `visual` | 非空字符串；`null`/空/全空白 → `DEFAULT_VISUAL="dust"`。**已知键**：`dust`（默认粒子）/ `TelegraphBudget.SPARK_VISUAL="spark"`（END_ROD，成本约 3.6 倍）/ `ring`（内置线框渲染器）/ 第三方 `registerStyle` 的 id | 判据只有 `visualOrDefault` 一份（轮 17 P3-11 之前是 `isEmpty`/`isBlank` 两套）；**未知名字静默按 `dust` 画**（轮 18 P2-3 之后不再静默变贵，但仍不额外报——拼错样式名不是"战斗结果错"） |
    | `FADE_TICKS` | 10（结算后的淡出尾巴，`lifetimeTicks() = max(1,warn) + FADE`） | — |
 
-   **三条入口的口径故意不同**：作者写的（JSON）越界要**响**——`MoveCodec` 逐字段拒并点名；DSL（`damageCircle`）越界
-   **warn 一次再钳**（形状在 `registerMoves` 里现算，抛出来会整张表回落到上一版，代价大于收益，但静默改值不可接受）；
-   坏存档/恶意服务端**只钳不打**。轮 17 P2-1 抓到的正是本条曾经写成"JSON/DSL 都响"——DSL 那一档当时并没有任何回执。
+   **四条入口的口径故意不同**（轮 18 设计偏差第 1 条：原来是三条，漏了"第三方直接 `new TelegraphZone(...)`"）：
+   作者写的（JSON）越界要**响**——`MoveCodec` 逐字段拒并点名；DSL 速记（`damageCircle`）越界
+   **按 (Boss, 种类) 响一次再钳**（`OncePerKey`，有界 LRU；轮 18 P2-3 之前它其实每次都响——那是在招式 lambda 里跑的，
+   配 `repeating(from,to,1,…)` 就是日志洪水），抛异常不行是因为形状在 `registerMoves` 的 lambda 里现算，
+   抛出会整张表回落到上一版（轮 9 的崩溃面），但静默改值也不可接受；坏存档/恶意服务端**只钳不打**；
+   **手搓 record 这一条既不拒也不响**（规范构造器是 public，框架没有 Boss 身份可做去重键），所以推荐 DSL 作者用
+   `damageCircle` 而不是自己 new。轮 17 P2-1 抓到的正是本条曾写成"JSON/DSL 都响"而 DSL 实际零回执。
 
-   **密度选型规则**（轮 17 设计偏差第 3 条，作者必须知道）：粒子档的槽位数 `= clamp(2πr·1.5, 8, 96)`、
-   每 tick 补的槽位数 `= clamp(240 / 寿命, 1, 槽位数)`（**稳态活跃粒子 = 生成率 × 寿命**，所以预算按存活数记，
-   全部轮廓合计再受 `GLOBAL_LIVE_PARTICLE_CAP = 2000` 这道总闸约束）；线框档 `segs = clamp(2πr·3, 24, 768)`。
-   于是"圈越大点越稀"：`r=256` 时粒子档约每 16.7 格一个点（基本读不出来），线框档每段约 2.1 格（明显多边形）
-   ⇒ **半径 > ~24 请配 `visual:"ring"`**，粒子档只适合近战量级的小圈。
+   **公共语义变化要写明**（轮 17 设计偏差第 1(a) 条，上一版只在处置表里说"已写进表里"、其实没写）：
+   `TelegraphZone` 是 public record，钳位发生在规范构造器 ⇒ `equals`/`hashCode`/访问器比较的都是**钳后值**——
+   两个不同的输入可以产生同一个键（`radius=300` 与 `radius=256` 相等）。下游若拿 zone 当 map key 或做 diff，
+   这是有意的一致性，不是 bug；但也意味着"读回来的值不保证等于你写进去的值"。
+
+   **密度与成本的选型规则**（轮 17 设计偏差第 3 条；数字于轮 18 P3-5 全部重算，之前那个"半径 > ~24"是编的）：
+   粒子档的式子在 `env/TelegraphBudget`（纯算术、不 import MC，所以最快那道门能断言它）——
+   想要的槽位数 `wantSlots = clamp(2πr·1.5, 8, 96)`；每 tick 生成率 `= clamp(240 / 粒子自身寿命, 1, …)`
+   （dust 48t ⇒ 5/tick；spark 71t ⇒ 3/tick）；**记账与预算都按"存活数 = 率 × 粒子寿命"**，
+   合计再受 `MAX_LIVE_GLOBAL = 2000` 这道总闸约束（默认 8 条各 240 刚好容得下）。
+   预算铺不满 `wantSlots` 时**把槽位数降下来**而不是留下几段弧——"圈合不上"的正确修法（轮 18 P2-1 后半）。
+   三个真实的转折点：密度在 **r ≈ 10.2** 处触到 96 槽上限（`96/(1.5·2π)`）；每点间隔在 **r ≈ 30.6** 处超过 2 格
+   （`2·96/(2π)`）；`r = 256` 时间隔 16.75 格（基本读不出来）。线框档是另一条轴：
+   `segs = clamp(2πr·3, 24, 768)` ⇒ r > 40.7 就饱和在 768 段，每段 `2πr/768` 格（r=256 时 2.1 格）。
+   ⇒ **要"看得出来是个圆"，r > ~30 请配 `visual:"ring"`**（多边形感远好于每 16 格一个点）；
+   另外长命圈（`warn` 大）**不会**因此变密——成本由粒子寿命决定，与圈寿命无关。
 
 2. **ArenaBlockAccess**：`clearBox(sweep, filter)`（NagaSmash 形）+ `applyPattern(offsetTable, facing, state)`（Yeti BREAK_1..4 形）+ mobGriefing/方块 tag 豁免门控。
 3. **结构保护 + POI 解锁**：`StructureDestructionEvents` 近乎可照搬；"已击败"用 POI 查询而非读结构 NBT（成本最低）；`getAllStructuresAt` 结果按 chunkKey 缓存。
@@ -806,3 +823,33 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > MoveJsonSelfTest 36→41）+ audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。客户端渲染路径仍只有代码+算术证据，
 > 但两道预算式子已抽成纯函数、自检能把它们跑红。
+
+> 进度（2026-09-25 第二十九批·审查轮 18 处置：**我上一批的"量纲修正"自己又错了一层，而且我引用了一段不存在的上一批代码**）：
+> ✅ 粒子成本第三次校准（轮 14 建立 → 轮 17 改半条 → 本批改对）：预算与记账都按<b>粒子自身寿命</b>而不是圈寿命——
+> dust 在 scale=1.2 下 9~48t（`DustParticleBase:26-27` 原文 + 40 万次采样均值 18.29）、END_ROD 60~71t
+> （`EndRodParticle:16`）。发射窗口取 `min(粒子寿命, 剩余 tick)`，所以快消失的圈自动少占额度（公平性那一半）。
+> ✅ "圈合不上"这才真的修了：预算铺不满想要的密度时**把槽位数一起降下来**（`slots = min(want, 率×窗口)`），
+> 而不是留着几段弧等它慢慢补——玩家看的是"同一时刻有多少个角位有粒子"，不是"这一发累计撒过多少"。
+> ✅ 新文件 `env/TelegraphBudget`（零 MC import）承载 `plan`/`ringSlotCount`/`particleLifeTicks`/`remainingTicks`，
+> `TelegraphClient` 只消费它。轮 18 设计偏差第 2 条的理由我接受：纯函数留在客户端类里，最快那道门就开始
+> 链接 `RenderType`，今天能跑只是因为解析发生在方法体——那是运气不是设计。
+> ✅ 谱系诚实性（轮 18 P2-2，本批最难看的一条）：我在 5 处写"上一批的式子是 `240*20/lifetime`、错 20 倍"，
+> 而 `git grep MAX_PARTICLES_PER_OUTLINE 615f449` 0 命中、`git log -S` 只命中本提交——那一稿**从未提交**。
+> `615f449` 的真实形态是每 tick 画满整圈（dust ≈1.7k 存活/条、错名 ≈6.3k），比我引用的"错法"更糟。
+> 五处措辞全部改正，并加一条纪律：**凡写"上一批是 X"先跑 `git log -S <标识符> --all`**，命中只有本提交就不许那样写。
+> ✅ 其余处置：DSL 的两条 warn 加 `env/OncePerKey`（有界 LRU）latch，自检钉住"同键只响一次 + 500 键冲刷后仍 ≤64"；
+> 偏移判据统一成 `hypot`（原先逐分量 ⇒ `(2048,2048)` 实际 2896.3）且钳位按比例缩以**保方向**；
+> `TelegraphView.fromTag` 要求几何齐件（`hasRequiredKeys`，否则"看不见的圈照样落伤"）；
+> `remainingTicks` 堵住 `(int)(end-start)` 在 `2^32-1` 时截成负数那条；`"spark"` 升成 `SPARK_VISUAL` 公开词表项；
+> `telegraphCap()` 的日志点名"cap 1 ⇒ 只有第一发带预警的招会落"。
+> ✅ §6.3/§2.4 五处数字重算：`absoluteMaxSize` 与 `MAX_CENTER_COORDINATE` **相等**（先前写"差 16 格"是把科学
+> 计数法的两种写法当两个数减了）；"半径 > ~24 用 ring"换成两个可复现转折点（密度 r≈10.2 饱和、
+> 每点间隔 r≈30.6 超 2 格）；"三个数量级"→ 2.6（443 倍）；"4 倍多"→ 均值 3.6 倍；
+> `equals/hashCode` 比较**钳后值**这件事真的写进了表里（上一版处置表说"已写"，实际没写）。
+> ⬜ 未做：`renderZones`（几何档）仍不进任何账——同一发在粒子档有成本上限、在 `ring` 档只受 `segs ≤ 768` 约束，
+> 两者之间没有合计闸；`warn=0` 速发圈一次爆发 240 个粒子的尖峰由**生成率**而非总量约束，本批没再收紧；
+> `ZoneWork` 扫场成本的独立上限、状态栈快照、跨招关系三件原语（v13 新线索：韧性/打断这条轴在库里几乎只有
+> 一个样本，`[首领崛起]` 用"招式自报层数 + 两级分岔"，见 `深挖__BOSS引擎调研v13__韧性打断与破势取证.md`）
+> 与 `DATA_DEATH_TICK`、许可证仍 ARR。
+> 验证：build（`-Pgecko`）+ 自检 **124/124**（118→124）+ audit **14** + `runGameTestServer`
+> **All 14 required tests passed**（两轮）。

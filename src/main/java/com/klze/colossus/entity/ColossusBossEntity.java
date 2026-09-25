@@ -285,7 +285,10 @@ public abstract class ColossusBossEntity extends Monster {
             this.telegraphCapWarned = true; // 一次性：越界要响，但不能每发 telegraph 响一遍
             Colossus.LOGGER.warn("boss {} maxActiveTelegraphs() returned {} — clamped to {} (valid range 1..{})."
                     + " Negative values are lifted to 1 on purpose: 0 would silently drop every"
-                            + " telegraphed attack, so it is not honoured as an off-switch.",
+                    + " telegraphed attack, so it is not honoured as an off-switch."
+                    + " Note what 0/1 actually means here: with cap 1 only the FIRST telegraphed move lands,"
+                    + " every later one is refused until a slot frees — if you want no telegraphs at all,"
+                    + " don't use telegraph frames in the move table.",
                     this.getBossId(), requested, clamped, HARD_MAX_TELEGRAPHS);
         }
         return clamped;
@@ -314,6 +317,12 @@ public abstract class ColossusBossEntity extends Monster {
         static @Nullable TelegraphView fromTag(net.minecraft.nbt.Tag t) {
             if (!(t instanceof CompoundTag tag)) return null;
             if (!tag.contains("id", net.minecraft.nbt.Tag.TAG_INT)) return null; // 残缺：丢掉，别在渲染路径炸
+            if (!tag.contains("start", net.minecraft.nbt.Tag.TAG_LONG)
+                    || !tag.contains("end", net.minecraft.nbt.Tag.TAG_LONG)) return null; // 同上（轮 18 P3-4）
+            // 几何缺件也丢：CompoundTag 的 getDouble/getString 对缺失返回 0/""（不抛），
+            // 一份截断的 tag 就会读成"世界原点一个 1 格圈"，而同一条待办里还带着伤害
+            // ——看不见的圈照样落伤，正是本仓最反对的失败模式（轮 18 P3-3）。
+            if (!com.klze.colossus.env.TelegraphZone.hasRequiredKeys(tag)) return null;
             return new TelegraphView(tag.getInt("id"), TelegraphZone.fromTag(tag),
                     tag.getLong("start"), tag.getLong("end"));
         }
@@ -330,8 +339,11 @@ public abstract class ColossusBossEntity extends Monster {
     /**
      * 登记一块危险区并投进同步数据（仅服务端；客户端调用返回"没登记"）。
      *
-     * <p>{@code ticks} 是<b>轮廓总寿命</b>（不是"距结算还有几 tick"）——
-     * 调用方一般直接给 {@link TelegraphZone#lifetimeTicks()}，让"淡出"与"结算"各管各的。
+     * <p>{@code ticks} 是<b>轮廓总寿命</b>（不是"距结算还有几 tick"）。调用方<b>应当</b>直接给
+     * {@link TelegraphZone#lifetimeTicks()}；轮 18 P3-9 之后这条不再只是约定——
+     * 实现按 {@code max(ticks, zone.lifetimeTicks())} 兜底，所以 public 面也<b>无法</b>登记一个
+     * "比结算先消失"的轮廓（原先这里是唯一能绕过 record 侧不变量的入口，GameTest 传的裸 40
+     * 只是恰好等于 warn30 + FADE10）。
      *
      * @return 这一条轮廓的 id（配 {@link #hideTelegraph(int)} 提前撤），
      *         投影已满时返回 {@code -1}。调用方<b>要</b>判：伤害帧要是连预警都画不出来，

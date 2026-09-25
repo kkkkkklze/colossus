@@ -43,16 +43,23 @@ public record TelegraphZone(double cx, double cy, double cz,
      * 合理上限——超过它多半是笔误，而 {@code warn = Integer.MAX_VALUE} 会让
      * {@code settleDelayTicks}/{@code lifetimeTicks} <b>双双溢出</b>（实测 -2147483639）。
      *
-     * <p>三条入口的口径<b>不</b>相同，说清免得下游误判（轮 17 P2-1 收回先前那句"JSON/DSL 都响"）：
+     * <p><b>四条</b>入口的口径<b>不</b>相同，说清免得下游误判（轮 17 P2-1 收回先前那句"JSON/DSL 都响"；
+     * 第四条由轮 18 设计偏差第 1 条补上——原先只列了三条，而 public 构造器本身就是第四条）：
      * <ul>
      *   <li><b>JSON</b>：{@code MoveCodec} 的 {@code circle_ahead} 有<b>字段级拒</b>，越界进不了表；</li>
-     *   <li><b>DSL</b>（{@link #damageCircle}）：没有登记期检查，越界只会被<b>这里</b>钳掉
-     *       （轮 17 实测：半径 400 静默变 256、warn 5000 静默变 1200，零日志）；</li>
-     *   <li><b>坏存档 / 恶意服务端</b>：只钳<b>不打</b>——炸在 {@code readAdditionalSaveData}
-     *       或渲染路径里＝区块一加载就崩（轮 9 那个教训）。</li>
+     *   <li><b>DSL 速记</b>（{@link #damageCircle}）：越界<b>先响一次再钳</b>——按 (Boss, 种类) 去重
+     *       （{@link OncePerKey}），因为本方法在招式 lambda 里跑，不去重就是日志洪水
+     *       （轮 18 P2-3；先前这里写的是"零日志"，那是轮 17 的事实，本批已改）；
+     *       为什么不升异常：形状是在 {@code registerMoves} 的 lambda 里现算的，抛出会整张表回落到上一版
+     *       （轮 9 的崩溃面），代价大于收益，但静默改值不可接受；</li>
+     *   <li><b>坏存档 / 恶意服务端</b>（{@link #fromTag}）：只钳<b>不打</b>——炸在 {@code readAdditionalSaveData}
+     *       或渲染路径里＝区块一加载就崩（轮 9 那个教训）；</li>
+     *   <li><b>第三方直接 {@code new TelegraphZone(...)}</b>：这是第四条，也是唯一<b>既不拒也不响</b>的一条——
+     *       规范构造器是 public，框架没法知道调用方是谁、也没有 Boss 身份可做去重键，所以只能静默钳。
+     *       要回执就走 {@link #damageCircle}（它会算前向偏移并给出 (Boss, 种类) 一次性的 warn）。
+     *       {@code MoveTriggers.telegraph/telegraphVisual} 收的用户 lambda 通常就是这一条，
+     *       所以框架推荐 DSL 作者用 {@code damageCircle} 而不是手搓 record。</li>
      * </ul>
-     * DSL 那一档为什么不升成异常：形状是在 {@code registerMoves} 里现算的，抛出来会整张表回落到
-     * 上一版（轮 9 的崩溃面），代价大于收益；但它静默改值不可接受 ⇒ 见 {@link #clampNotice}。
      */
     public static final double MAX_RADIUS = 256.0;
     public static final int MAX_WARN_TICKS = 1200;
@@ -62,8 +69,11 @@ public record TelegraphZone(double cx, double cy, double cz,
      * vanilla 声明的那个 {@code WorldBorder.MAX_CENTER_COORDINATE}（{@code WorldBorder.java:19}，
      * {@code 2.9999984E7D}）——<b>不</b>是自己挑的一个数，也不引用它名字相近的兄弟：
      * 本版本 {@code MAX_CENTER_COORDINATE} 声明后<b>没有任何地方使用</b>（全树 1 处命中就是声明本身，
-     * 与 {@code ParticleEngine.MAX_PARTICLES_PER_LAYER} 同一类死常量），真正生效的是
-     * {@code WorldBorder.java:27} 的 {@code absoluteMaxSize = 29999984}，两者差 16 格。
+     * 与 {@code ParticleEngine.MAX_PARTICLES_PER_LAYER} 同一类死常量），真正参与钳位的是
+     * {@code WorldBorder.java:27} 的 {@code int absoluteMaxSize = 29999984}——
+     * <b>两个数相等</b>（{@code 2.9999984E7 = 29999984}，差 0）。
+     * 这里特别写一句：上一版说"两者差 16 格"，那是我把科学计数法的<b>两种写法</b>当两个数减了一下，
+     * 是本仓自述"编造源码依据"之后的<b>下一次</b>（轮 18 P3-5 抓到）。
      *
      * <p>所以这一道<b>不</b>是"圈心离 Boss 不能超过这么多"的业务规则——框架不做那种判断。
      * 它只挡两类值：非有限数（NaN/±Inf 会让 {@link #box()} 退化成空盒或无限盒，
@@ -134,26 +144,42 @@ public record TelegraphZone(double cx, double cy, double cz,
      * 圈心偏移的同一档回执（轮 17 P3-5：{@code radius}/{@code warn} 有界而 {@code forward}/{@code side}
      * 任意大——一个 {@code forward=1e300} 的圈会落在世界边界外，扫场扫不到人、<b>零回执</b>，
      * 比"半径太大"更静默）。返回非空时调用方（{@link #damageCircle}）照它钳。
+     *
+     * <p><b>按范数判，不按分量</b>（轮 18 P3-1）：上一版逐分量比 {@code Math.abs(v)}，
+     * 于是 {@code forward=2048, side=2048} 两条都"合法"而实际偏移 2896.3——比上限宽了 √2 倍，
+     * 而规格与回执文案写的都是"范数 ≤"。现在判据与文案同一个量。
      */
     public static java.util.Optional<String> offsetNotice(double wantForward, double wantSide) {
-        if (outOfOffset(wantForward) || outOfOffset(wantSide)) {
+        if (outOfOffset(wantForward, wantSide)) {
             return java.util.Optional.of("telegraph center offset was clamped: forward " + wantForward
-                    + ", side " + wantSide + " -> |v| <= " + MAX_AHEAD_OFFSET
+                    + ", side " + wantSide + " -> hypot <= " + MAX_AHEAD_OFFSET
                     + " (a drop that far out should be a projectile, not a ground zone)");
         }
         return java.util.Optional.empty();
     }
 
-    private static boolean outOfOffset(double v) {
-        return !Double.isFinite(v) || Math.abs(v) > MAX_AHEAD_OFFSET;
+    private static boolean outOfOffset(double forward, double side) {
+        return !Double.isFinite(forward) || !Double.isFinite(side)
+                || Math.hypot(forward, side) > MAX_AHEAD_OFFSET;
     }
 
-    /** 偏移钳位（非有限 → 0，即"圈画在自己脚下"；越界 → 取边界值）。 */
-    public static double clampOffset(double v) {
-        if (!Double.isFinite(v)) return 0.0;
-        if (v > MAX_AHEAD_OFFSET) return MAX_AHEAD_OFFSET;
-        if (v < -MAX_AHEAD_OFFSET) return -MAX_AHEAD_OFFSET;
-        return v;
+    /** 钳好的一对偏移。 */
+    public record Offsets(double forward, double side) {}
+
+    /**
+     * 偏移钳位：非有限 → 0（"圈画在自己脚下"）；范数越界 → <b>按比例缩</b>而不是逐分量截断
+     * ——逐分量截会把作者指的方向改掉（{@code (2048,2048)} 截成 {@code (2048,2048)} 不变，
+     * 而 {@code (4096,100)} 截成 {@code (2048,100)} 就换了朝向）。
+     */
+    public static Offsets clampOffsets(double forward, double side) {
+        double f = Double.isFinite(forward) ? forward : 0.0;
+        double s = Double.isFinite(side) ? side : 0.0;
+        double norm = Math.hypot(f, s);
+        if (norm > MAX_AHEAD_OFFSET && norm > 0.0) {
+            double k = MAX_AHEAD_OFFSET / norm;
+            return new Offsets(f * k, s * k);
+        }
+        return new Offsets(f, s);
     }
 
     /** 轮廓该活多久：<b>整段</b> warn 窗口 + 淡出，客户端与服务端投影响时都用这一个口径。 */
@@ -187,21 +213,29 @@ public record TelegraphZone(double cx, double cy, double cz,
 
     /** 伤害型结算（默认 visual={@link #DEFAULT_VISUAL}；damage/knockback 由 ZoneEffect 携带）。
      *  前向取 <b>yBodyRot 水平投影</b>而非 getLookAngle——抬头看天时视线水平分量趋零，
-     *  圈心会塌回脚下（审查 P2#11）。 */
+     *  圈心会塌回脚下（审查 P2#11）。
+     *
+     *  <p><b>回执是"每个 Boss 每种问题一次"，不是每次调用一次</b>（轮 18 P2-3）：本方法在招式 lambda 里
+     *  跑，挂在 {@code repeating(from,to,1,...)} 上就是每秒两条 warn 的服务端日志洪水。
+     *  去重走 {@link OncePerKey}（有界 LRU），所以"作者写错了要响"和"响到淹没日志"两件事都有上限。 */
     public static TelegraphZone damageCircle(ColossusBossEntity boss, double forward, double side,
                                              double radiusXZ, int warnTicks, int colorRGB) {
         // 偏移先过闸再进几何式子：`fx * 1e300` 会把 NaN 乘出来，而下游三条路各自吞 NaN 的样子不同
-        offsetNotice(forward, side).ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
-                "boss {} {}: {}", boss.getBossId(), "DSL telegraph offset out of range", msg));
-        forward = clampOffset(forward);
-        side = clampOffset(side);
+        String who = String.valueOf(boss.getBossId());
+        offsetNotice(forward, side).filter(m -> OncePerKey.firstTime(who + "|offset"))
+                .ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
+                        "boss {} {}: {} (further identical notices are suppressed)",
+                        boss.getBossId(), "DSL telegraph offset out of range", msg));
+        var off = clampOffsets(forward, side);
         double fx = -Math.sin(Math.toRadians(boss.yBodyRot));
         double fz = Math.cos(Math.toRadians(boss.yBodyRot));
-        double cx = boss.getX() + fx * forward - fz * side;
-        double cz = boss.getZ() + fz * forward + fx * side;
+        double cx = boss.getX() + fx * off.forward() - fz * off.side();
+        double cz = boss.getZ() + fz * off.forward() + fx * off.side();
         double cy = boss.getY() + 0.1;
-        clampNotice(radiusXZ, warnTicks).ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
-                "boss {} {}: {}", boss.getBossId(), "DSL telegraph shape out of range", msg));
+        clampNotice(radiusXZ, warnTicks).filter(m -> OncePerKey.firstTime(who + "|shape"))
+                .ifPresent(msg -> com.klze.colossus.Colossus.LOGGER.warn(
+                        "boss {} {}: {} (further identical notices are suppressed)",
+                        boss.getBossId(), "DSL telegraph shape out of range", msg));
         return new TelegraphZone(cx, cy, cz, radiusXZ, 1.0, warnTicks, colorRGB, DEFAULT_VISUAL);
     }
 
@@ -224,6 +258,27 @@ public record TelegraphZone(double cx, double cy, double cz,
         tag.putInt("color", this.colorRGB);
         tag.putString("visual", this.visual);
         return tag;
+    }
+
+    /**
+     * 一份 view tag 是否<b>齐件</b>（轮 18 P3-3）。
+     *
+     * <p>为什么必须有：{@code CompoundTag#getDouble/getInt/getString} 对<b>缺失或错类型</b>一律返回
+     * 0/""（不抛，见 {@code CompoundTag.java:291/324/335}），所以一份被截断的 tag 会读成
+     * {@code cx=cy=cz=0、rXZ=0→构造器回落 1.0、warn=0→settle=1}——世界原点一个 1 格圈，
+     * 而 {@code ZoneWork} 那份载荷里还带着伤害，于是"看不见的圈照样落伤"。
+     * 键名表与 {@link #toTag()} 同处一地维护，避免"写了新字段忘了验"。
+     */
+    public static boolean hasRequiredKeys(CompoundTag tag) {
+        if (tag == null) return false;
+        return tag.contains("cx", net.minecraft.nbt.Tag.TAG_DOUBLE)
+                && tag.contains("cy", net.minecraft.nbt.Tag.TAG_DOUBLE)
+                && tag.contains("cz", net.minecraft.nbt.Tag.TAG_DOUBLE)
+                && tag.contains("rXZ", net.minecraft.nbt.Tag.TAG_DOUBLE)
+                && tag.contains("rY", net.minecraft.nbt.Tag.TAG_DOUBLE)
+                && tag.contains("warn", net.minecraft.nbt.Tag.TAG_INT)
+                && tag.contains("color", net.minecraft.nbt.Tag.TAG_INT)
+                && tag.contains("visual", net.minecraft.nbt.Tag.TAG_STRING);
     }
 
     public static TelegraphZone fromTag(CompoundTag tag) {

@@ -157,18 +157,15 @@ public final class MoveCodec {
                 throw new MoveDataException(field + ".radius", "半径必须是 0.."
                         + com.klze.colossus.env.TelegraphZone.MAX_RADIUS + " 的有限正数，拿到 " + d.radius());
             }
-            // 轮 17 P3-5：forward/side 原先完全不设防。后果不是崩而是"圈画在没人那儿"——
-            // 服务端扫场扫不到、零回执，作者只看到"这一招莫名其妙不疼"。两条分开拒，
-            // 免得坏的那条被另一条的名字盖住（轮 13 P2-1 同一族）。
-            if (!Double.isFinite(d.forward()) || Math.abs(d.forward())
-                    > com.klze.colossus.env.TelegraphZone.MAX_AHEAD_OFFSET) {
-                throw new MoveDataException(field + ".forward", "圈心前向偏移必须是有限的、且 |值| <= "
-                        + com.klze.colossus.env.TelegraphZone.MAX_AHEAD_OFFSET + "，拿到 " + d.forward());
-            }
-            if (!Double.isFinite(d.side()) || Math.abs(d.side())
-                    > com.klze.colossus.env.TelegraphZone.MAX_AHEAD_OFFSET) {
-                throw new MoveDataException(field + ".side", "圈心侧向偏移必须是有限的、且 |值| <= "
-                        + com.klze.colossus.env.TelegraphZone.MAX_AHEAD_OFFSET + "，拿到 " + d.side());
+            // 轮 17 P3-5 + 轮 18 P3-1：偏移按**范数**判，与 TelegraphZone.offsetNotice/clampOffsets 同一条
+            // 判据（逐分量判会让 (2048,2048) 两条都"合法"而实际偏移 2896.3，比上限宽 √2 倍）。
+            // 后果不是崩而是"圈画在没人那儿"——扫场扫不到、零回执，作者只看到"这一招莫名其妙不疼"。
+            if (!Double.isFinite(d.forward()) || !Double.isFinite(d.side())
+                    || Math.hypot(d.forward(), d.side())
+                            > com.klze.colossus.env.TelegraphZone.MAX_AHEAD_OFFSET) {
+                throw new MoveDataException(field + ".forward/.side", "圈心偏移必须是有限的、且 hypot(forward,side) <= "
+                        + com.klze.colossus.env.TelegraphZone.MAX_AHEAD_OFFSET + "，拿到 forward=" + d.forward()
+                        + " side=" + d.side());
             }
             return boss -> {
                 TelegraphZone z = TelegraphZone.damageCircle(boss, d.forward(), d.side(),
