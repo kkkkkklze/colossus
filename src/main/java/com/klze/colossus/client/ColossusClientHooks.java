@@ -62,7 +62,11 @@ public final class ColossusClientHooks {
      * 供 {@link TelegraphClient#tick()} 每 tick 去读。用 vanilla 的进/出场事件维持，
      * 且只在本类（{@code Dist.CLIENT}）里引用客户端渲染层——common 代码不碰 client 包。
      */
-    @SubscribeEvent
+    // LOWEST：ClientLevel:336 是 `if (post(event)) return;`，而 post 的返回值要等**所有**处理器跑完才知道
+    // ⇒ 同优先级里排在我们后面的取消者，我们读 isCanceled() 也看不见（轮 16 P3-4）。
+    // 真正的兜底在 TelegraphClient.tick() 里查 isAddedToWorld()（那一步在 entityStorage.addEntity 之后
+    // 才由 ClientLevel:339 置位）。
+    @SubscribeEvent(priority = net.minecraftforge.eventbus.api.EventPriority.LOWEST)
     public static void onEntityJoin(net.minecraftforge.event.entity.EntityJoinLevelEvent event) {
         // 先判取消（轮 14 P3-7）：ClientLevel:336 是**先 post 再 entityStorage.addEntity**，
         // 第三方取消这条事件时实体根本没进图，却已被我们 watch ⇒ 它的投影会读成"看得见的圈"

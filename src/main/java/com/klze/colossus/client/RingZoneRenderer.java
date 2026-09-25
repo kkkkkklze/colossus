@@ -21,7 +21,11 @@ public final class RingZoneRenderer implements ZoneRenderer {
         VertexConsumer buf = buffers.getBuffer(RenderType.LINES);
         PoseStack.Pose p = pose.last();
         float radius = (float) v.radiusXZ() * Mth.lerp(v.progress(), 1.06f, 0.94f); // 微微收口
-        int segs = Math.max(24, (int) (2 * Math.PI * radius * 3));
+        // 段数硬上限 768（每帧 1536 顶点）。record 侧已经把半径钳到 TelegraphZone.MAX_RADIUS=256，
+        // 但 2π·256·3 ≈ 4825 段仍然偏贵，所以这里再钳一道**绝对**上限——大圈的代价是线框变粗，
+        // 不是卡死（轮 16 P2-3：radius=1e9 时这个 int 会饱和成 Integer.MAX_VALUE ⇒ 每帧 42 亿顶点的循环）。
+        // 注意 768 与 MAX_RADIUS 没有推导关系：它是"再大的圈也只画 768 段"的表现选择。
+        int segs = Mth.clamp((int) (2 * Math.PI * radius * 3), 24, 768);
         int alpha = (int) ((0.45f + 0.5f * v.progress()) * 255f);
         int r8 = (v.colorRGB() >> 16) & 0xFF;
         int g8 = (v.colorRGB() >> 8) & 0xFF;

@@ -162,6 +162,21 @@ final class MoveJsonSelfTest {
                 rejects("{ 'id':'b', 'duration':10, 'weight':[{'kind':'distance_band','min':-2.0,"
                         + "'max':6.0,'add':10}],'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }",
                         "负数"));
+        // 轮 16 P3-5：作者的形状问题必须在载入时响，坏存档才走 record 构造器的静默钳位。
+        // 半径无界是事故级（几何档每帧顶点数 ≈6πr；粒子档；服务端扫场），warn 超界则让
+        // settle/lifetime 双双溢出成"没有预警的一发"。
+        check.accept("oversized telegraph radius is refused at the field level",
+                rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':1e9},'effect':{'kind':'damage','damage':1.0}}}] }",
+                        "radius"));
+        check.accept("non-positive telegraph radius is refused too",
+                rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':0.0},'effect':{'kind':'damage','damage':1.0}}}] }",
+                        "radius"));
+        check.accept("oversized warn window is refused before it can overflow the lifetime math",
+                rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':4.0,'warn':2147483647},"
+                        + "'effect':{'kind':'damage','damage':1.0}}}] }", "warn"));
         // 轮 13 P2-1：拒因要能指到第几条，否则 16 项的表只能靠二分找行
         check.accept("a bad second weight entry names its index in the report",
                 rejects("{ 'id':'b', 'duration':10, 'weight':[{'kind':'base','base':1},"

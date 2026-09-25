@@ -492,6 +492,35 @@ public final class StateSelfTest {
                         && new com.klze.colossus.env.TelegraphZone(0, 0, 0, 1, 1, -5, 0, "dust")
                                 .lifetimeTicks() == 1 + com.klze.colossus.env.TelegraphZone.FADE_TICKS);
 
+        // === 轮 16 P2-3/P3-5：形状自身的上界钳在 record 的规范构造器里，三条消费路径同时受益 ===
+        // 半径无界不是"难看"而是事故：几何档每帧顶点数 ≈6πr（r=1e9 时 int 饱和成 Integer.MAX_VALUE
+        // ⇒ 每帧 42 亿顶点的循环）、粒子档每 tick 点数、服务端 ZoneWork 的 getEntitiesOfClass(巨大 AABB)。
+        var wide = new com.klze.colossus.env.TelegraphZone(0, 0, 0, 1e9, 1e9, 30, 0, "ring");
+        check("radius is clamped at the shape itself (both axes, positive + finite)",
+                wide.radiusXZ() == com.klze.colossus.env.TelegraphZone.MAX_RADIUS
+                        && wide.radiusY() == com.klze.colossus.env.TelegraphZone.MAX_RADIUS);
+        var junk = new com.klze.colossus.env.TelegraphZone(0, 0, 0, Double.NaN, -4.0, 30, 0, "ring");
+        check("NaN / negative radius fall back to a drawable 1.0 rather than propagating",
+                junk.radiusXZ() == 1.0 && junk.radiusY() == 1.0);
+        // 溢出这一档是本轮新抓的：warn=Integer.MAX_VALUE 时 settle 变 1、lifetime 变负数，
+        // "想要超长预警"静默成"没有预警的一发"
+        var huge = new com.klze.colossus.env.TelegraphZone(0, 0, 0, 4, 1, Integer.MAX_VALUE, 0, "ring");
+        check("warn saturates into MAX_WARN_TICKS so settle/lifetime never overflow",
+                huge.warnTicks() == com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS
+                        && huge.settleDelayTicks() > 0 && huge.lifetimeTicks() > 0);
+        // 关系不变量：轮廓必须比"那一发的结算时刻"<b>活得久</b>（先消失的就是"伤害凭空落下"）
+        boolean outlineOutlivesBurst = true;
+        for (int w : new int[]{0, 1, 5, 30, 60, com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS}) {
+            var z = new com.klze.colossus.env.TelegraphZone(0, 0, 0, 4, 1, w, 0, "dust");
+            outlineOutlivesBurst &= z.lifetimeTicks() >= z.settleDelayTicks()
+                    && z.settleDelayTicks() == Math.max(1, w + 1);
+        }
+        check("across every legal warn: outline lifetime >= burst delay (one shared formula)",
+                outlineOutlivesBurst);
+        var blankVisual = new com.klze.colossus.env.TelegraphZone(0, 0, 0, 4, 1, 20, 0, "  ");
+        check("a blank visual falls back to the particle tier instead of rendering nothing at all",
+                "dust".equals(blankVisual.visual()));
+
         var burst = new com.klze.colossus.env.ZoneBurst(6.0f, 0.5f, 40)
                 .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.0f, 0));
         var bb = com.klze.colossus.env.ZoneBurst.fromTag(burst.toTag());

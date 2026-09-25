@@ -32,6 +32,39 @@ public record TelegraphZone(double cx, double cy, double cz,
     /** 结算之后轮廓还要多留这么多 tick 淡出（旧 {@code broadcastZone} 里那个字面量 +10）。 */
     public static final int FADE_TICKS = 10;
 
+    /**
+     * 半径与预警窗口的硬上界。<b>钳在形状的源头（本 record 的规范构造器）</b>，
+     * 而不是钳在各消费端——因为同一个 radius 会被三条路各自放大成事故（轮 16 P2-3）：
+     * 几何档每帧顶点数 {@code ≈ 6πr}（r=1e9 → {@code Integer.MAX_VALUE} 个顶点的循环，客户端卡死/OOM）、
+     * 粒子档每 tick 点数、以及服务端 {@code ZoneWork → getEntitiesOfClass(巨大 AABB)} 的扫场。
+     *
+     * <p>256 格足够任何近战/弹道危险区用；{@code warn} 的 1200 tick（60 秒）是"预警窗口"这个概念的
+     * 合理上限——超过它多半是笔误，而 {@code warn = Integer.MAX_VALUE} 会让
+     * {@code settleDelayTicks}/{@code lifetimeTicks} <b>双双溢出</b>（实测 -2147483639）。
+     *
+     * <p>两条路径的口径不同且是有意为之：<b>作者写的</b>（JSON/DSL）越界要响，
+     * 所以 {@code MoveCodec} 另有字段级拒；<b>坏存档读回来的</b>只钳不打，
+     * 因为炸在 {@code readAdditionalSaveData} 里＝区块一加载就崩（轮 9 那个教训）。
+     */
+    public static final double MAX_RADIUS = 256.0;
+    public static final int MAX_WARN_TICKS = 1200;
+
+    public TelegraphZone {
+        radiusXZ = finiteOr(radiusXZ, 1.0);
+        if (!(radiusXZ > 0.0)) radiusXZ = 1.0; // NaN 与 <=0 都回落到 1，不给下游"负半径"这种新问题
+        radiusXZ = Math.min(radiusXZ, MAX_RADIUS);
+        radiusY = finiteOr(radiusY, 1.0);
+        if (!(radiusY > 0.0)) radiusY = 1.0;
+        radiusY = Math.min(radiusY, MAX_RADIUS);
+        if (warnTicks < 0) warnTicks = 0;
+        warnTicks = Math.min(warnTicks, MAX_WARN_TICKS);
+        if (visual == null || visual.isBlank()) visual = "dust";
+    }
+
+    private static double finiteOr(double v, double fallback) {
+        return Double.isFinite(v) ? v : fallback;
+    }
+
     /** 轮廓该活多久：<b>整段</b> warn 窗口 + 淡出，客户端与服务端投影响时都用这一个口径。 */
     public int lifetimeTicks() {
         return Math.max(1, this.warnTicks) + FADE_TICKS;
@@ -112,7 +145,9 @@ public record TelegraphZone(double cx, double cy, double cz,
      * <p>旧名字是 {@code broadcast(boss)}——它发一条一次性广播就撒手，所以中途进场、
      * 重进世界、换维度都看不见；现在改成登记进 Boss 的同步数据，由 vanilla 的追踪器补包。
      *
-     * @return false＝Boss 的轮廓投影已满（{@code MAX_ACTIVE_TELEGRAPHS}），这一条<b>没</b>登记上。
+     * @return false＝Boss 的轮廓投影已满，这一条<b>没</b>登记上。上限是
+     *         {@code ColossusBossEntity.maxActiveTelegraphs()}（默认 8、可覆写，硬上界
+     *         {@code HARD_MAX_TELEGRAPHS = 32}）——<b>不是</b>只有那个常量。
      *         带伤害的帧必须据此放弃整发，别留一发没预警的结算。
      */
     public boolean show(ColossusBossEntity boss) {

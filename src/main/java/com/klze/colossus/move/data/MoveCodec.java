@@ -143,8 +143,19 @@ public final class MoveCodec {
 
         ZONE_KINDS.put("circle_ahead", (el, field) -> {
             CircleAhead d = decodeRecord(el, CircleAhead.CODEC, field);
+            // 作者的形状问题在载入时就报字段级回执，坏存档才走 record 构造器的静默钳位（两者口径见 TelegraphZone）
             if (d.warn() < 0) { // 负 warn 会让 lifetimeTicks()/settleDelayTicks() 的两道 max(1,…) 各说一半（轮 14 P3-6）
-                throw new MoveDataException(field + ".warn", "预警窗口不能是负数：" + d.warn());
+                throw new MoveDataException(field + ".warn",
+                        "预警窗口不能是负数：" + d.warn());
+            }
+            if (d.warn() > com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS) {
+                throw new MoveDataException(field + ".warn", "预警窗口超上限 "
+                        + com.klze.colossus.env.TelegraphZone.MAX_WARN_TICKS + "：" + d.warn());
+            }
+            if (!(d.radius() > 0.0) || !Double.isFinite(d.radius())
+                    || d.radius() > com.klze.colossus.env.TelegraphZone.MAX_RADIUS) {
+                throw new MoveDataException(field + ".radius", "半径必须是 0.."
+                        + com.klze.colossus.env.TelegraphZone.MAX_RADIUS + " 的有限正数，拿到 " + d.radius());
             }
             return boss -> {
                 TelegraphZone z = TelegraphZone.damageCircle(boss, d.forward(), d.side(),

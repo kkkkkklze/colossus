@@ -691,3 +691,35 @@ protected void registerMoves(MoveSetBuilder m) {
 > 验证：build（`-Pgecko`）+ 自检 **100/100**（本轮无新增条数，改的是渲染/日志/钳位形态）+ audit **14**
 > + `runGameTestServer` **All 14 required tests passed**（两轮）。仍未验：客户端画面（含本轮两条 P1 的复现，
 > 它们是纯代码路径结论）。
+
+> 进度（2026-09-25 第二十七批·审查轮 16 处置：**上一批我自己加的四道钳位里，两处只修半条、一处日志改动没落地**）：
+> 共同成因是一句话——**钳位要钳在形状被三条消费路径分叉之前，而不是钳在其中一条上**。
+> ✅ **半径与预警窗口钳在 `TelegraphZone` 的规范构造器**（本批最要紧的一条）：轮 16 算给我看，
+> 几何档每帧顶点数 ≈ `6πr`，而 `radiusXZ` 三个入口（JSON 裸 `Codec.DOUBLE`、DSL、坏存档 `getDouble`）
+> 一个都不设防 ⇒ `r=1e9` 时 double→int 收窄饱和成 `Integer.MAX_VALUE` ⇒ **每帧 42 亿顶点的循环**
+> （客户端卡死/OOM），而上一批我只钳了粒子档那条路径、几何档一个字节没减（示范 Boss 两条 telegraph
+> 恰好都在用几何档）。现在 `MAX_RADIUS = 256` / `MAX_WARN_TICKS = 1200` 钳在源头，三条路径同时受益；
+> `RingZoneRenderer` 再自钳 `segs ≤ 768` 作纵深防御。**两种口径的分工也定下来**：作者写的（JSON）
+> 走字段级拒，坏存档走静默钳——因为炸在 `readAdditionalSaveData` 里＝区块一加载就崩（轮 9 那个教训）。
+> ✅ `warn = Integer.MAX_VALUE` 那档也不再溢出：原先 `settleDelayTicks()=1` 而 `lifetimeTicks()` 溢出成负数
+> 再被折成 1 ⇒ "想要超长预警"静默变成"没有预警的一发"。自检现在对**所有**合法 warn 跑一遍
+> `lifetime >= settle` 的循环断言（不是挑一档样例），另加半径/NaN/空白样式的回落判据，共 **+8 条 → 108/108**。
+> ✅ 粒子距离闸改成按**到圆环最近点**算（`nearOutlineDistSq`）：上一批按圈心算，结果"站在大圈边缘的人
+> ——最需要看见它的人——整圈一个粒子都不撒"，而这道闸本来的目的就是替代 vanilla 那条**逐粒子**算的闸，
+> 不能比它更严。`clear()` 也不再清名单：名单唯一的重填点是 `EntityJoinLevelEvent`（一个实体一生一次），
+> 第三方调 public 的 `clear()` 会把仍在追踪范围内的 Boss **永久丢掉**；旧维度的条目交给 level 判据自剔。
+> ✅ `telegraphCap()` 下界从 0 抬到 **1**：子类写 `return -1`（"不限"的通用写法）时 `size() >= 0` 恒真
+> ⇒ 该 Boss 所有带预警的招一招不落，而日志从"cap -1（一眼是配错）"变成"cap 0（像框架有意决定）"，
+> 诊断力反而变差；现在越界打一次性 warn 写清"你给的 X 已钳到 Y，合法范围 1..32"。虚调用也提出循环
+> （坏存档两万条不该跑两万次）。
+> ✅ 三处"文档说做了、代码里没有"里最直白的一处：拒因 warn 那条日志有 4 个 `{}` 只传了 3 个实参，
+> 会打出行面 `{} zone(s) refused`——**本仓第四次**同类。因此把纪律落成可跑的东西（上面那条循环断言），
+> 并要求处置表里每句"已加 X"提交前回读代码确认 X 存在（`isAddedToWorld()` 判据、`EventPriority.LOWEST`、
+> 两处 javadoc、`HARD_MAX` 的说明同样补齐）。
+> 未做（记 §3）：`MAX_PARTICLES_PER_LAYER` 这类 vanilla 容量件在本版本无人使用，框架若要更细的成本控制
+> 得自己数活跃粒子；坏存档在 `ZoneWork` 侧的半径无界（同一条 record 钳位已覆盖，但 `getEntitiesOfClass`
+> 扫场成本没另设上限）；状态栈快照仍欠（v12a/v12b 的形态已定：招内相对 tick + fired 位图 + 绝对时刻作废）；
+> 跨招关系三件原语；`DATA_DEATH_TICK`；许可证仍 ARR。
+> 验证：build（`-Pgecko`）+ 自检 **108/108**（+8）+ audit **14** + `runGameTestServer`
+> **All 14 required tests passed**（两轮）。客户端路径（粒子成本、几何档顶点数）仍只能靠代码与算术证据，
+> 无头门对它瞎这件事本批已写进口径。

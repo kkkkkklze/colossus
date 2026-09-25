@@ -33,11 +33,12 @@ import java.util.Map;
  *       由世界本身回答，而不是"从 0 再亮一遍"。</li>
  * </ul>
  *
- * <p><b>换维度不在这三条里，而且是另一回事</b>（轮 14 P2-1）：1.20.1 换维度时
- * {@code ClientPacketListener:1029-1041} 直接 new 一个新的 {@code ClientLevel}，
+ * <p><b>换维度不在这三条里，而且是另一回事</b>（轮 14 P2-1、轮 15 P1-2、轮 16 P3-3 三次修正的同一条）：
+ * 1.20.1 换维度时 {@code ClientPacketListener:1029-1041} 直接 new 一个新的 {@code ClientLevel}，
  * <b>不逐个发实体离场事件</b>（全树唯一的客户端 {@code EntityLeaveLevelEvent} 发射点是
- * {@code ClientLevel:972} 的 {@code removeEntity}，这条路径上没人调它）。所以旧维度的名单
- * 只能靠 {@link #tick()} 里的"等级身份变了就整表清空"来收尾，不指望弱引用被 GC 掉。
+ * {@code ClientLevel:972} 的 {@code removeEntity}）。收尾办法是：轮廓按"等级实例变了就作废"清，
+ * 名单<b>保留</b>、由 {@code boss.level() != mc.level} 逐条剔——因为 {@code EntityJoinLevelEvent}
+ * 一个实体一生只发一次，清名单会把这一 tick 刚登记的 Boss 永久抹掉（轮 15 P1-2 就是这个）。
  *
  * <p>驱动点：粒子与投影刷新在 ColossusClientHooks 的 ClientTick，几何档在 RenderLevelStageEvent。
  */
@@ -152,7 +153,9 @@ public final class TelegraphClient {
         while (watching.hasNext()) {
             Map.Entry<Integer, Watched> e = watching.next();
             ColossusBossEntity boss = e.getValue().boss.get();
-            if (boss == null || boss.isRemoved() || boss.level() != mc.level) {
+            // isAddedToWorld()：Entity.java:3455，置位点在 ClientLevel:339（entityStorage.addEntity 之后）。
+            // 事件被别的处理器（在我们之后）取消时实体根本没进图，那时它是 false（轮 16 P3-4）。
+            if (boss == null || boss.isRemoved() || boss.level() != mc.level || !boss.isAddedToWorld()) {
                 dropOwner(e.getKey());
                 watching.remove();
                 continue;
@@ -173,9 +176,11 @@ public final class TelegraphClient {
         while (zones.hasNext()) {
             Live z = zones.next().getValue();
             if (z.endGameTime <= now) { zones.remove(); version++; continue; }
-            // 时钟还没对齐就<b>不画</b>（轮 14 P3-1 的收口方向）：新 ClientLevel 的 gameTime 起点是 0
-            // （ClientLevelData 构造器不设该字段），只有当 respawn 与 SetTime 被 netty 拆到不同批时
-            // 才会出现"本地钟远小于 start"。这种帧画出来是一只 0% 的假圈，宁可空一帧。
+            // 本地钟<b>落后超过一整个寿命</b>才不画（轮 16 P3-7 把措辞改成与实现一致）：
+            // 新 ClientLevel 的 gameTime 起点是 0（ClientLevelData 构造器不设该字段，靠 tickTime 自增），
+            // 只有 respawn 与 SetTime 被 netty 拆到不同批时才会看到那种量级的错位。
+            // 代价与收益都写清：正常补包晚 1~3 tick 不会误伤（span 最小 11）；反过来单程延迟若真超过
+            // 一整个寿命（约 550ms 起，对最短的那批圈），这里会压掉开头几 tick——宁压不假。
             if (now < z.startGameTime - (z.endGameTime - z.startGameTime)) continue;
             if (!hasStyle(z.visual)) spawnOutlineParticles(mc, z); // 几何档接管时不双份表现
         }
@@ -190,12 +195,18 @@ public final class TelegraphClient {
         return ((long) bossId << 32) | (viewId & 0xFFFFFFFFL);
     }
 
-    /** 清场在世界切换与登出时做——投影随时能从同步数据重建，所以清空不再是"丢了就没了"。 */
+    /**
+     * 丢掉<b>当前画着的轮廓</b>并复位世界身份。<b>不动名单</b>（轮 16 P3-3）：
+     * 名单唯一的重填点是 {@code EntityJoinLevelEvent}，一个实体一生只发一次——
+     * 第三方调这个 public 方法若把名单清空，<b>仍在追踪范围内的 Boss 就永远不被盯了</b>
+     * （只有它离开追踪范围再回来、或换维度才救得回来）。
+     * 旧维度的条目交给 {@code tick()} 里 {@code boss.level() != mc.level} 那条判据自己剔，
+     * 所以登出路径也不需要一个"顺手清名单"。
+     */
     public static void clear() {
         if (!ZONES.isEmpty()) version++;
         ZONES.clear();
-        WATCHED.clear();
-        lastLevel = null; // 这是一张 static 强引用：不复位就把整张旧 ClientLevel（连同 entityStorage/chunkSource）扣住
+        lastLevel = null; // static 强引用：不复位就把整张旧 ClientLevel（entityStorage/chunkSource 一长串）扣住
     }
 
     /** 在途轮廓条数（诊断用）。 */
@@ -241,7 +252,8 @@ public final class TelegraphClient {
     }
 
     /**
-     * 粒子档的成本上限：距离平方（64 格）与每圈点数（96）。
+     * 粒子档的成本上限：<b>到圆环</b>的距离（48 格＝vanilla 那道 32 格闸加 16 格补包余量，
+     * 见 {@link #nearOutlineDistSq}）与每圈点数（96）。
      *
      * <p>为什么必须自己节流（轮 14 P2-2）：{@code force=true} 买到"不被距离裁剪"的同时，
      * 也把 vanilla 那两个<b>事实上的总量闸</b>（{@code LevelRenderer:2511} 的 32 格、
@@ -252,12 +264,15 @@ public final class TelegraphClient {
      * 一圈 = {@code 2πr·1.5} 个点：r=30 就是 282 个/圈/ tick，八个圈同放足以把帧率打穿。
      * "修对了可见性"不等于"没引入新的代价"，所以这两道闸放在框架侧。
      */
-    private static final double PARTICLE_CULL_DIST_SQ = 64.0D * 64.0D;
+    private static final double PARTICLE_CULL_DIST_SQ = 48.0D * 48.0D;
     private static final int MAX_POINTS_PER_OUTLINE = 96;
 
     /** 粒子档：沿轮廓撒一圈。 */
     private static void spawnOutlineParticles(Minecraft mc, Live z) {
-        if (mc.player != null && mc.player.distanceToSqr(z.center) > PARTICLE_CULL_DIST_SQ) return;
+        // 按<b>到圆环最近点</b>算，不是到圈心（轮 16 P2-2）：到圈心的话，玩家站在大圈的边缘
+        // ——最需要看见它的人——反而整圈一个粒子都不撒，而这道闸恰恰是为了替代
+        // vanilla 那条"逐粒子对相机算"的闸（LevelRenderer:2511）而加的，不能比它更严。
+        if (mc.player != null && nearOutlineDistSq(mc.player, z) > PARTICLE_CULL_DIST_SQ) return;
         RandomSource r = mc.level.getRandom();
         ParticleOptions p = z.cachedParticle != null ? z.cachedParticle : (z.cachedParticle = particleFor(z));
         double circumference = 2 * Math.PI * z.radiusXZ;
@@ -277,6 +292,22 @@ public final class TelegraphClient {
                     z.center.z + Math.sin(angle) * z.radiusXZ,
                     0, 0.01, 0);
         }
+    }
+
+    /**
+     * 玩家到<b>轮廓圆环</b>（不是到圆盘填充区）的最近距离平方。
+     *
+     * <p>为什么不是"到 AABB 的最近点"（轮 16 P2-2 追加）：那等于把圈当实心盘算，人一旦落在盘内
+     * 距离就是 0 ⇒ 半径 200 的圈会从 200 格外一路撒到 32 格外，整整 <b>168 格</b>都在撒粒子，
+     * "总量闸"形同没有。正确量是"离那条线有多远"：水平方向取 {@code |‖p-c‖ - r|}，
+     * 竖直方向才用"超出盘厚度的部分"。
+     */
+    private static double nearOutlineDistSq(net.minecraft.world.entity.player.Player player, Live z) {
+        double dx = player.getX() - z.center.x;
+        double dz = player.getZ() - z.center.z;
+        double radial = Math.abs(Math.sqrt(dx * dx + dz * dz) - z.radiusXZ);
+        double dy = Math.max(0.0, Math.abs(player.getY() - z.center.y) - (z.radiusY + 1.0));
+        return radial * radial + dy * dy;
     }
 
     private static ParticleOptions particleFor(Live z) {
