@@ -767,14 +767,15 @@ public class ColossusGameTests {
                         + "（回到小号会和还在世的轮廓撞号：撤一条会撤错、客户端会提前覆写）");
 
         helper.runAfterDelay(50, () -> {
-            long mine = revived.telegraphViews().stream()
-                    .filter(v -> v.id() <= ColossusBossEntity.MAX_ACTIVE_TELEGRAPHS).count();
-            helper.assertTrue(mine == 0,
-                    "自己登记的轮廓（id<=8）都该按绝对时刻到期，还剩 " + mine
+            helper.assertTrue(revived.activeTelegraphCount() == 0,
+                    "到点的轮廓必须从在途集合里退干净，实际还剩 " + revived.activeTelegraphCount()
                             + " 条（永不消失的圈＝tell 在撒谎；now=" + helper.getLevel().getGameTime() + "）");
-            helper.assertTrue(revived.telegraphSnapshot().contains("views")
-                            == (revived.activeTelegraphCount() > 0),
-                    "同步快照要与服务端在途集合同进退（快照空而集合非空＝客户端少画，反之多画）");
+            // 两条分开钉，不用上一轮的"同进退"合取：无目标的 Boss 在这 50t 里自己不会出招，
+            // 合取的两个半边必然同时为假 ⇒ 恒真、抓不到任何东西（轮 14 P2-5，正是本仓刚立的
+            // "装饰不是判据"那条）。这条钉的是"到期后有没有顺手重投投影"——漏 publish 就红。
+            helper.assertTrue(revived.telegraphProjectionCount() == 0,
+                    "在途集合清空后同步投影也要跟着空，实际投影里还有 " + revived.telegraphProjectionCount()
+                            + " 条（集合与投影脱节＝客户端永远画着旧圈）");
             succeedClean(helper, boss, revived);
         });
     }

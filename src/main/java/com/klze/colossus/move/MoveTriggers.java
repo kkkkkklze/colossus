@@ -78,6 +78,12 @@ public final class MoveTriggers {
      * 危险区预告帧：把 telegraph 区登记进 Boss 的同步数据（客户端画轮廓），warnTicks 后由实体
      * 延迟队列对区域内实体执行 effect——BR IceSpike 的"数据形态"，触发时机由帧表声明。
      *
+     * <p>容量是要算账的：投影上限 {@code ColossusBossEntity.maxActiveTelegraphs()}（默认 8）
+     * 与待办队列上限 32 各自独立，而"投影满 ⇒ 整发放弃"是有意选的方向 ⇒ 挂在
+     * {@code repeating(from,to,period)} 上时同时在地的圈数约
+     * {@code ceil((warnTicks + TelegraphZone.FADE_TICKS) / period)}，超出的那些<b>一招都不会落</b>
+     * （日志每 100 tick 至多一条，腾出位子时报累计条数）。高频圈请加长 period 或按 Boss 抬上限。
+     *
      * <p>轮廓与结算<b>两套生命周期各走各的</b>：结算在 {@code scheduleWork} 的待办队列里
      * （可跨存档），可视态在 {@code DATA_TELEGRAPHS} 的投影里（可补包、可重放）。
      * 二者都由 Boss 自己持有，所以中途进场/换维度/重载都不会看见"只有一半"的演出。

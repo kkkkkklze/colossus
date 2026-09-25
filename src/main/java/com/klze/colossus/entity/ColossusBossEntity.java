@@ -241,8 +241,21 @@ public abstract class ColossusBossEntity extends Monster {
     private static final EntityDataAccessor<CompoundTag> DATA_TELEGRAPHS =
             SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.COMPOUND_TAG);
 
-    /** 同时在途的轮廓上限（与 {@link #MAX_PENDING_WORK} 同一动机：不封顶就是高频 telegraph 把同步数据越写越大）。 */
+    /**
+     * 同时在途的轮廓<b>默认</b>上限（与 {@link #MAX_PENDING_WORK} 同一动机：不封顶就是高频
+     * telegraph 把同步数据越写越大）。可被 {@link #maxActiveTelegraphs()} 按实例抬高——
+     * 它<b>不是</b>装饰值：投影满 ⇒ {@code MoveTriggers.telegraph} 会<b>放弃整发</b>，
+     * 所以这个数字直接决定「哪几招在实战里根本不会出场」。
+     *
+     * <p>算式（轮 14 P2-4，写给要配高频 telegraph 的人）：把 {@code telegraph} 挂在
+     * {@code repeating(from,to,period)} 上时，同时在地上的圈数约
+     * {@code ceil((warnTicks + TelegraphZone.FADE_TICKS) / period)}——{@code warn=60, period=10}
+     * 单单一帧就要 7 格，两帧就撞顶。要么加长 period，要么抬 {@link #maxActiveTelegraphs()}。
+     */
     public static final int MAX_ACTIVE_TELEGRAPHS = 8;
+
+    /** 在途轮廓上限（子类可按 Boss 抬；先读 {@link #MAX_ACTIVE_TELEGRAPHS} 上那条算式再抬）。 */
+    protected int maxActiveTelegraphs() { return MAX_ACTIVE_TELEGRAPHS; }
 
     /** 一条在途轮廓：几何 + 起止的绝对 gameTime。{@code id} 只用来让客户端认出"还是同一块地"。 */
     public record TelegraphView(int id, TelegraphZone zone, long startGameTime, long endGameTime) {
@@ -266,6 +279,8 @@ public abstract class ColossusBossEntity extends Monster {
     private final java.util.LinkedHashMap<Integer, TelegraphView> telegraphViews =
             new java.util.LinkedHashMap<>();
     private int telegraphSeq = 0;
+    /** 仅客户端：上一次读到的投影<b>实例</b>，供 {@link #takeTelegraphViewsIfChanged()} 做 O(1) 判据。 */
+    @Nullable private CompoundTag telegraphClientMemo;
     /** 最近的到期时刻（没有在途轮廓时＝{@link Long#MAX_VALUE}）；aiStep 只在跨过它的那一 tick 重投，热路径 O(1)。 */
     private long nextTelegraphCheck = Long.MAX_VALUE;
 
@@ -283,12 +298,24 @@ public abstract class ColossusBossEntity extends Monster {
     public int showTelegraph(TelegraphZone zone, int ticks) {
         if (this.level().isClientSide || zone == null) return -1;
         if (this.deathPending) return -1; // 演出中不该再立新圈：下面那发一定会被 ZoneWork 判弃
-        if (this.telegraphViews.size() >= MAX_ACTIVE_TELEGRAPHS) {
-            Colossus.LOGGER.warn("boss {} telegraph projection full ({} entries) — refusing new zone at ({}, {}, {})",
-                    this.getBossId(), this.telegraphViews.size(),
-                    String.format("%.1f", zone.cx()), String.format("%.1f", zone.cy()),
-                    String.format("%.1f", zone.cz()));
+        if (this.telegraphViews.size() >= maxActiveTelegraphs()) {
+            // 原先每拒一次打一行＝period=10 时约 2 行/秒/Boss（轮 14 P2-4）。改成
+            // 「撞顶期间每 100 tick 至多一条 + 腾出位子时把攒下的条数一次报完」——
+            // 与本仓 MoveSet 构造期 warn 同一去重姿态，但这里攒的是「被吞掉了几招」。
+            this.telegraphRefusals++;
+            long bucket = this.level().getGameTime() / 100L;
+            if (this.telegraphFullWarnedAt != bucket) {
+                this.telegraphFullWarnedAt = bucket;
+                Colossus.LOGGER.warn("boss {} telegraph projection full ({} entries, cap {}) — new zones refused"
+                        + " and each refusal also drops that attack (see MoveTriggers#telegraph)",
+                        this.getBossId(), this.telegraphViews.size(), maxActiveTelegraphs());
+            }
             return -1;
+        }
+        if (this.telegraphRefusals > 0) {
+            Colossus.LOGGER.warn("boss {} telegraph projection freed after {} zone(s) were refused",
+                    this.getBossId(), this.telegraphRefusals);
+            this.telegraphRefusals = 0;
         }
         long now = this.level().getGameTime();
         int id = ++this.telegraphSeq;
@@ -296,6 +323,9 @@ public abstract class ColossusBossEntity extends Monster {
         this.publishTelegraphs();
         return id;
     }
+
+    private int telegraphRefusals = 0;
+    private long telegraphFullWarnedAt = Long.MIN_VALUE;
 
     /** 提前撤掉一条轮廓（id 来自 {@link #showTelegraph}；不存在时静默忽略）。 */
     public void hideTelegraph(int viewId) {
@@ -332,19 +362,34 @@ public abstract class ColossusBossEntity extends Monster {
     }
 
     /**
-     * 轮廓快照的<b>原始 tag</b>（客户端只用来判"这份数据换过没有"——vanilla 每次补包都换实例，
-     * 所以引用比较是 O(1) 且正好够用）。
-     *
-     * <p><b>不许改返回值</b>：它就是 entityData 里那个活对象，原地改会让 vanilla 的脏判据
-     * （{@code ObjectUtils.notEqual}）永远看不出变化 ⇒ 一帧都不发。要读内容请用 {@link #telegraphViews()}。
+     * 轮廓投影的<b>条目数</b>（读同步数据本身，不是在途集合的长度）。
+     * 回归桩用它钉"改了集合有没有顺手重投"：两个数不等＝忘记 publish 那一类回归。
      */
-    public CompoundTag telegraphSnapshot() {
-        return this.entityData.get(DATA_TELEGRAPHS);
+    public int telegraphProjectionCount() {
+        CompoundTag snapshot = this.entityData.get(DATA_TELEGRAPHS);
+        return snapshot.contains("views") ? snapshot.getList("views", net.minecraft.nbt.Tag.TAG_COMPOUND).size() : 0;
     }
 
-    /** 在途轮廓解码结果（客户端渲染层与诊断用；空快照零分配）。 */
-    public java.util.List<TelegraphView> telegraphViews() {
+    /**
+     * 客户端渲染层用：自上次读取以来投影<b>换过实例</b>就返回解码结果，否则返回 {@code null}。
+     *
+     * <p>为什么不是"把 tag 交出去让调用方自己比引用"（轮 14 P2-3）：那个对象就是 entityData 里的
+     * 活对象，而<b>两条判据都挂在它身上</b>——服务端 {@code SynchedEntityData#set} 用
+     * {@code ObjectUtils.notEqual} 且 {@code CompoundTag#equals} 是<b>内容</b>比较，客户端又用
+     * <b>实例</b>比较。一次原地误改会同时打掉"发包"与"重建"两条腿：服务端一帧不发、
+     * 客户端那一圈集永久冻结（撤销只能靠重投），且全程零日志。判据留在实体里，出去的是解码结果。
+     *
+     * <p>副作用有意为之：记下"这次读到的实例"，下次同实例即视为未变。只在客户端用。
+     */
+    @Nullable
+    public java.util.List<TelegraphView> takeTelegraphViewsIfChanged() {
         CompoundTag snapshot = this.entityData.get(DATA_TELEGRAPHS);
+        if (snapshot == this.telegraphClientMemo) return null;
+        this.telegraphClientMemo = snapshot;
+        return decodeTelegraphs(snapshot);
+    }
+
+    private java.util.List<TelegraphView> decodeTelegraphs(CompoundTag snapshot) {
         if (!snapshot.contains("views")) return java.util.List.of();
         net.minecraft.nbt.ListTag list = snapshot.getList("views", net.minecraft.nbt.Tag.TAG_COMPOUND);
         java.util.List<TelegraphView> out = new java.util.ArrayList<>(list.size());
@@ -353,6 +398,11 @@ public abstract class ColossusBossEntity extends Monster {
             if (v != null) out.add(v);
         }
         return out;
+    }
+
+    /** 在途轮廓解码结果（服务端诊断与投影核对用；空快照零分配）。 */
+    public java.util.List<TelegraphView> telegraphViews() {
+        return decodeTelegraphs(this.entityData.get(DATA_TELEGRAPHS));
     }
 
     /** 服务端在途条数（回归桩判据：投影响、封顶、到期清理三件事都从这一个口径读）。 */
@@ -370,7 +420,8 @@ public abstract class ColossusBossEntity extends Monster {
     }
 
     private boolean deathPending = false;
-    private boolean deathResolved = false;    private boolean phaseLock = false;
+    private boolean deathResolved = false;
+    private boolean phaseLock = false;
     private boolean[] gatesFired = null;
     /** 读档恢复：演出中被卸载的 Boss 重载后在首个 aiStep 续上死亡流程（审查 P1）。 */
     private boolean resumeDeathPending = false;
@@ -1575,12 +1626,23 @@ public abstract class ColossusBossEntity extends Monster {
             // 不需要像旧写法那样"把剩余量重新当年龄"（那是第十六批之前的对称缺陷）。
             this.telegraphViews.clear();
             long now = this.level().getGameTime();
-            for (var t : tag.getList("colossus_telegraphs", net.minecraft.nbt.Tag.TAG_COMPOUND)) {
-                TelegraphView v = TelegraphView.fromTag(t);
-                if (v == null) continue; // 残缺：丢掉（同 ZoneWork 的读侧口径）
-                if (v.endGameTime() <= now) continue; // 卸载期间已经烧完：不补画，也不会有伤害落
+            int expired = 0;
+            int overflow = 0;
+            for (var entry : tag.getList("colossus_telegraphs", net.minecraft.nbt.Tag.TAG_COMPOUND)) {
+                TelegraphView v = TelegraphView.fromTag(entry);
+                if (v == null || v.id() <= 0) { expired++; continue; } // 残缺/id<=0 会把续号撞进哨兵（轮 14 P3-7）
+                // 与待办队列<b>同一条</b>判据：那发的到期时刻是 start + warn + 1（见 MoveTriggers#telegraph）。
+                // 只按 end 剪会留下一个 FADE 宽度的窗口——work 被 "due<=now" 丢掉、圈却还亮着，
+                // 于是"不补画就不会有伤害落"这句在重载路径上说过头了（轮 14 P3-8）。
+                if (v.endGameTime() <= now
+                        || v.startGameTime() + Math.max(1, v.zone().warnTicks()) + 1L <= now) { expired++; continue; }
+                if (this.telegraphViews.size() >= maxActiveTelegraphs()) { overflow++; continue; } // 读侧也要封顶（轮 14 P2-2）
                 this.telegraphViews.put(v.id(), v);
                 if (v.id() > this.telegraphSeq) this.telegraphSeq = v.id(); // 序号续上，别把 id 发给还活着的旧轮廓
+            }
+            if (expired + overflow > 0) {
+                Colossus.LOGGER.warn("boss {} dropped {} expired/malformed and {} over-cap telegraph views on load"
+                        + " ({} kept)", this.getBossId(), expired, overflow, this.telegraphViews.size());
             }
             this.publishTelegraphs(); // 重载后必须重投：entityData 不落盘，补包快照靠它
         }

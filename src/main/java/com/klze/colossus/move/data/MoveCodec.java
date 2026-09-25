@@ -233,8 +233,12 @@ public final class MoveCodec {
             JsonElement v = member.getValue();
             boolean isBoolean = v.isJsonPrimitive() && v.getAsJsonPrimitive().isBoolean();
             if (isBoolean && !allowedBooleans.contains(member.getKey())) {
+                // 消息里点明"这一项词汇表里没有"也是可能的成因：RecordCodecBuilder 对未知键是
+                // **忽略**的，只有这道布尔闸会理它 ⇒ 作者加的注释性布尔成员会收到一句指向
+                // 词汇表外字段的拒因（轮 14 P3-2）。
                 throw new MoveDataException(field + "." + member.getKey(),
-                        "这里要的是数字/字符串，给了布尔 " + v + "（DFU 会把它静默折成 1/0）");
+                        "该成员的值给了布尔 " + v + "，而这里要么是本记录声明过的数字/字符串字段、"
+                                + "要么根本不该出现（DFU 会把布尔静默折成 1/0）");
             }
         }
         return orThrow(decode(el, codec), field);
@@ -361,12 +365,18 @@ public final class MoveCodec {
                             requireInt(three.get(1), "frames[" + i + "].repeating[1]"),
                             requireInt(three.get(2), "frames[" + i + "].repeating[2]"),
                             (boss, tick) -> trigger.execute(boss, tick)));
-                } else {
-                    RepeatingWindow d = decodeRecord(row.getAsJsonObject("repeating"),
-                            RepeatingWindow.CODEC, "frames[" + i + "].repeating");
+                } else if (row.get("repeating") instanceof JsonObject ro) {
+                    RepeatingWindow d = decodeRecord(ro, RepeatingWindow.CODEC, "frames[" + i + "].repeating");
                     out.add(com.klze.colossus.state.FrameRunner.Frame.repeating(
                             d.from(), d.to(), d.period(),
                             (boss, tick) -> trigger.execute(boss, tick)));
+                } else {
+                    // 数组形态长度不对（漏写 period 是最像笔误的一种）以前会落到
+                    // {@code getAsJsonObject} 抛 IllegalStateException ⇒ 回执从字段级退化成
+                    // "解析炸了 + 整段 JSON"（轮 14 P3-1）。这里改回字段级拒。
+                    throw new MoveDataException("frames[" + i + "].repeating",
+                            "要 [from,to,period] 三元素数组或 {from,to,period} 对象，拿到 "
+                                    + row.get("repeating"));
                 }
             } else {
                 throw new MoveDataException("frames[" + i + "]",
@@ -390,7 +400,7 @@ public final class MoveCodec {
             if (!(arr.get(i) instanceof JsonObject row)) {
                 throw new MoveDataException("weight[" + i + "]", "not an object");
             }
-            String kind = requireString(row, "kind");
+            String kind = requireString(row, "kind", "weight[" + i + "].kind");
             WeightDecoder d = WEIGHT_KEYS.get(kind);
             if (d == null) throw new MoveDataException("weight[" + i + "].kind", "unknown weight '" + kind + "'");
             // 历史项与普通项分开攒：轮 10 F2 实测 demo 表在 >6 格时 3-6=-3 整条被 pick 丢掉，
@@ -455,7 +465,7 @@ public final class MoveCodec {
             throw new MoveDataException(field, "触发器嵌套超过 " + MAX_TRIGGER_DEPTH + " 层");
         }
         if (!(el instanceof JsonObject obj)) throw new MoveDataException(field, "expected an object");
-        String typeId = requireString(obj, "type");
+        String typeId = requireString(obj, "type", field + ".type");
         // tryParse 而不是 new ResourceLocation：非法字符串会直接抛 IllegalArgumentException，
         // 那会被当成"记录解析炸了"收进回执，作者看到的是一句路径报错而不是"这一招不认识"
         ResourceLocation parsed = ResourceLocation.tryParse(typeId);

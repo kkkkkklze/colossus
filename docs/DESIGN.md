@@ -327,7 +327,8 @@ protected void registerMoves(MoveSetBuilder m) {
 > 另记一次工具性自伤：用 python `s.replace(切片, 新块)` 时切片取成空串，`replace('', x)` 会把新块插进**每个字符之间**，
 > `MoveCodec.java` 一度变成 47 万行——已按该文件最后一次提交恢复（无未提交工作丢失），坏文件留在 `/tmp/MoveCodec.corrupted.bak`。
 > 规矩：**改文件别用 index 切片 + 全局 replace，用精确 Edit**。
-> 边界：telegraph 的**客户端轮廓**不持久化（重载后圈子的伤害照落、轮廓消失），要一起恢复得让 ZoneSync 也进 NBT，记 v0.3。>【第二十四批已做：轮廓改成 `DATA_TELEGRAPHS` 投影 + 绝对 gameTime，`ZoneSync` 包整个删掉。】
+> 边界：telegraph 的**客户端轮廓**不持久化（重载后圈子的伤害照落、轮廓消失），要一起恢复得让 ZoneSync 也进 NBT，记 v0.3。
+> 【第二十四批已做：轮廓改成 `DATA_TELEGRAPHS` 投影 + 绝对 gameTime，`ZoneSync` 包整个删掉。】
 
 > 进度（2026-09-25 第十七批·审查轮 7 处置 + 测试隔离面重构）：✅ addon 与渲染层的门全部改读同步数据
 > （`attackAnimName()`/`isAttacking()`），动画名新增 `DATA_ATTACK_ANIM` 由服务端下发——
@@ -352,7 +353,8 @@ protected void registerMoves(MoveSetBuilder m) {
 > 验证：build（含 `-Pgecko` addon 编译 + `jarColossusGecko`）+ **62/62** + audit **11** +
 > GameTest **All 11 required tests passed**，且**连跑四轮全绿**。
 > 遗留：多人客户端动画表现仍无法自证（起不了真客户端，addon 无 geo 资产）；`requires`/`weight`
-> 谓词面扩展、~~ZoneSync 入 NBT（重载后预警轮廓消失但伤害照落）~~【第二十四批已做，见 §7】、> `not_recent`/连招历史（第二十一~二十批已做）、
+> 谓词面扩展、~~ZoneSync 入 NBT（重载后预警轮廓消失但伤害照落）~~【第二十四批已做，见 §7】、
+> `not_recent`/连招历史（第二十/二十一批已做）、
 > BossBar 自定义纹理消费者、许可证裁定（仍 ARR）、`build/libs/examplemod-1.0.0.jar` 待清。
 
 > 进度（2026-09-25 第十八批·审查轮 8 处置）：✅ 修掉一条 P1 —— **已结算尸体过档变 1 血不死雕像**
@@ -425,7 +427,9 @@ protected void registerMoves(MoveSetBuilder m) {
 > 的"可重入"只限 `colossus_dying=true` 的续演路径（已结算尸体那档不进演出，残留排期是死数据）。
 > 遗留新增：`DATA_DEATH_TICK` 是 entityData 不落盘 ⇒ 重载后的尸体在 ≤20t 里 `deathTick()==0`，
 > 客户端**没有死亡动画**（站着消失）。修前是 1 血雕像，所以不算回归，但这条要真做就得让 ZoneSync
-> 那类"重载补状态"的通道把死亡帧也带上，与预警轮廓入 NBT 记同一笔账（§3）。>【第二十四批把"轮廓"那一半做掉了——做法正是"塞进 SynchedEntityData 让 vanilla 补包"；> `DATA_DEATH_TICK` 那一半仍欠，同一套路可以直接复用它，见 §7 第二十四批的"未做"。】
+> 那类"重载补状态"的通道把死亡帧也带上，与预警轮廓入 NBT 记同一笔账（§3）。
+> 【第二十四批把"轮廓"那一半做掉了——做法正是"塞进 `SynchedEntityData` 让 vanilla 补包"；
+> `DATA_DEATH_TICK` 那一半仍欠，同一套路可以直接复用它，见 §7 第二十四批的"未做"。】
 > 验证：build（`-Pgecko`）+ 自检 **69/69** + audit **12** + GameTest **All 12 passed**（连跑三轮稳定）。
 
 > 进度（2026-09-25 第二十批·not_recent 招式历史，v10 的第一批落地）：✅ v10 重派已落盘并被我抽查过
@@ -544,7 +548,13 @@ protected void registerMoves(MoveSetBuilder m) {
 > `ServerEntity#sendPairingData`（1.20.1 的 `ServerEntity.java:237-239`）会**自动**给新追踪者补发一份
 > `ClientboundSetEntityDataPacket` 全量快照，而 `sendDirtyEntityData:294` 每次发包都刷新
 > `trackedDataValues`——所以"形状塞进 `SynchedEntityData`"这一条就同时买齐了
-> 中途进场、换维度/重进世界、存档重载三种补状态，**一行自定义补发包都不写**。
+> 中途进场、重进世界、存档重载三种补状态，**一行自定义补发包都不写**。
+> （**换维度不在其中**——轮 14 P2-1：`ClientPacketListener:1029-1041` 换维度时直接 new 一个新的
+> `ClientLevel`，**不逐个发实体离场事件**（客户端唯一的 `EntityLeaveLevelEvent` 发射点是
+> `ClientLevel:972` 的 `removeEntity`，那条路径不经过它）；而且客户端 `gameTime` 要等下一次
+> `ClientboundSetTimePacket`（`MinecraftServer:883-887` 每 20 tick 一发）才校正。
+> 两条都在 `TelegraphClient.tick()` 里收口：等级实例一变就整表清空（不靠 GC、不靠离场事件），
+> 并在注释里把"≤20 tick 内进度按 0 显示"这个窗口写成明账。）
 > 落地形态：`DATA_TELEGRAPHS`（`COMPOUND_TAG`，`{views:[{几何…, id, start, end}]}`），
 > 计时用**绝对 `gameTime`**（`handleSetTime:912` 把服务端 `level.getGameTime()` 原样发给客户端，
 > `ClientLevel.tickTime:225` 本地自增 ⇒ 双端同一时基，晚到的人看到的是"这块地已经烧掉一半"而不是从头再亮）。
@@ -561,9 +571,15 @@ protected void registerMoves(MoveSetBuilder m) {
 > （两条 Boss 的视图序号会重复 ⇒ 键必须带宿主）；数据源从"包"改成"每客户端 tick 读投影"，
 > 用 `EntityJoinLevelEvent`/`EntityLeaveLevelEvent`（`ClientLevel.java:336`/`:972` 实测双端都发）维护名单，
 > 判"要不要重建"用**tag 实例引用比较**（`assignValues` 每次补包都换新实例 ⇒ O(1) 且恰好够用），
-> 弱引用兜住"断线时 vanilla 不逐个发离场事件"那一档。粒子改 `addAlwaysVisibleParticle`——
-> 旧写法在 32 格外必然画不出来（`LevelRenderer.java:2511` 的 `distanceToSqr > 1024.0D → null`，
-> `:2514` 还会被玩家"粒子=最少"整批丢），而危险区恰恰是大半径演出。
+> 弱引用兜住"断线时 vanilla 不逐个发离场事件"那一档。粒子改的是**带 boolean 的那个**
+> `addAlwaysVisibleParticle` 重载——这里本批先写错过一次，轮 14 P1-1 抓出来：7 参形态在 1.20.1 是
+> `ClientLevel.java:597-598 → levelRenderer.addParticle(p, false, true, …)`，第一个实参 `force`
+> 被写死成 **false** ⇒ `LevelRenderer.java:2509` 的短路走不到、`:2511` 那道
+> `distanceToSqr > 1024.0D`（＝32 格）的闸**照旧生效**；第二个 boolean 只喂
+> `calculateParticleLevel(:2518-2528)`，连"粒子=最少"也只救回 1/10 概率。8 参形态
+> （`ClientLevel.java:601-602`）把 `getOverrideLimiter() || force` 传成 true，才是 vanilla 给营火烟
+> 用的那一档（`CampfireBlock.java:191`）。**教训**："换个看着大方的方法名"不等于绕开了闸，
+> 重载列表里那个不起眼的 boolean 才是开关——读实现，别读名字。
 > ✅ 血条消费端两条：①`setVisible(false)` 这条**第三条路径**原先没人清客户端镜像
 > （vanilla 那儿只发自己的 REMOVE 包、不调 `removePlayer`，`ServerBossEvent.java:121-130`），
 > 现在样式/护盾的补齐与清零各收成一个入口（`pushMirrorTo`/`clearMirrorFor`），进视角/转可见/离场/隐藏
@@ -590,3 +606,41 @@ protected void registerMoves(MoveSetBuilder m) {
 > 读档后序号续得上"；日志里那 13 条 `telegraph projection full` 是容量门的实证（20 次请求 ⇒ 7 成 13 拒）。
 > **仍未验**：客户端表现本身（起不了真客户端）——本批改的三条"看得见"的收益（中途进场、重进世界、
 > 32 格外轮廓）只有服务端与源码级证据，画面复验仍挂在 playtest-bridge 那条账上。
+
+> 进度（2026-09-25 第二十五批·审查轮 14 处置，**第一条就是上一批"修了但没修上"的功能改动**）：
+> ⚠ **收回第二十四批的一条断言**：粒子那句"改 `addAlwaysVisibleParticle` 即可绕开 32 格闸"只对了一半。
+> 7 参形态在 1.20.1 是 `ClientLevel.java:597-598 → levelRenderer.addParticle(p, false, true, …)`——
+> 第一个实参 `force` 被 vanilla 写死成 **false** ⇒ `LevelRenderer.java:2509` 的短路走不到，
+> `:2511` 那道 `distanceToSqr > 1024.0D`（＝32 格）的闸**照旧生效**；第二个 boolean 只喂
+> `calculateParticleLevel(:2518-2528)`，连"玩家把粒子调到最少"也只按 1/10 概率救回。
+> 真正的那一档是 8 参 + `true`（`ClientLevel.java:601-602`，vanilla 自己给营火烟用的就是它，
+> `CampfireBlock.java:191`）。**这条值得单独记**：方法名里的 "AlwaysVisible" 是它自己的语义
+> （"不受粒子设置整批丢弃"），不是我想要的"不受距离裁剪"——**读实现，别读名字**（§0.4 那条
+> "机制断言要能指到代码路径"又一次抓到我）。
+> ✅ 换维度不补进"三条自愈"，改成明账（轮 14 P2-1）：`ClientPacketListener:1029-1041` 换维度时直接
+> new 一个新 `ClientLevel`、**不逐个发实体离场事件**（客户端唯一的 `EntityLeaveLevelEvent` 发射点是
+> `ClientLevel:972`），所以旧维度的 Boss 与圈只能由 `TelegraphClient.tick()` 的"等级实例变了就整表清空"
+> 收尾；客户端 `gameTime` 也要等下一次 `ClientboundSetTimePacket`（每 20 tick 一发）才校正 ⇒
+> 换维度后 ≤20 tick 内进度按 0 显示。两条都写进注释，不再宣称"同一时基"无条件下成立。
+> ✅ 三道防御缺口：投影恢复读侧同口径封顶（`/data merge` 或坏存档塞进几百条会顶到 `readNbt` 的
+> 2 MiB accounter，客户端解包直接抛）；`id <= 0` 读侧拒（续号撞进"投影满"哨兵会让之后每发 telegraph
+> 被静默判满）；重载剪枝与待办队列改用**同一条**到期判据（`start + warn + 1 <= now` 也剪），
+> 消掉"圈亮着但那发永不落"那一档。
+> ✅ `telegraphSnapshot()` 这个 raw 访问器删了（轮 14 P2-3）：它是 entityData 里的活对象，
+> 而服务端脏判据（`ObjectUtils.notEqual` + `CompoundTag#equals` 是**内容**比较）与客户端重建判据
+> （**实例**比较）同时挂在它身上 ⇒ 一次原地误改会同时打掉"发包"与"重建"两条腿且零日志。
+> 现在出去的是解码结果（`takeTelegraphViewsIfChanged()`，memo 留在实体里）与一个计数
+> （`telegraphProjectionCount()`，回归桩用它钉"改了集合有没有顺手重投"）。
+> ✅ 投影上限从写死的常量改成 `protected int maxActiveTelegraphs()`，并把算式写进 javadoc：
+> 它是**战斗逻辑门**（满了就整发放弃），`telegraph` 挂 `repeating` 时在地圈数 ≈
+> `ceil((warn + FADE) / period)`；拒因日志同步去重（撞顶期每 100 tick 至多一条 + 腾出位子时报累计吞了几招）。
+> ✅ 桩与回执三修：那条恒真的"同进退"合取拆成两条硬判据（轮 13 刚立的"装饰不是判据"，我自己又犯）；
+> `repeating` 给成错长度数组时从 `IllegalStateException` 退回字段级拒；`weight[i].kind`/`trigger.type`
+> 两处短名回执补上索引；渲染侧回到"复用快照列表 + 版本号"（不每帧分配，样式回调改表也不 CME）。
+> 未做（继续挂 §3）：几何档才是大半径危险区的根治方向（粒子档再怎么改都在 vanilla 的裁剪体系里）；
+> `DATA_DEATH_TICK` 仍不落盘；跨区块可见需要 chunk 级叠加层；跨招关系词汇表（v12b 在查）；
+> 帧时间线入档续播（v12a 在查）；`fx/ScreenShakeCue` 仍是 common 类里引 client 类的第二格
+> （今天不炸：`player()` 服务端永不被调，方法体不验证——但这是"靠没人调"而非"有门"）；许可证仍 ARR。
+> 验证：build（`-Pgecko`）+ 自检 **100/100**（本轮**没有**新增自检条数：P2-5 是替换退化判据、
+> P3 那几条改的是拒因形态，不为此注水计数）+ audit **14** + `runGameTestServer`
+> **All 14 required tests passed**（两轮）。仍未验：客户端画面本身。
