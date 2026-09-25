@@ -72,7 +72,8 @@ protected void registerMoves(MoveSetBuilder m) {
      .phase(0, 2)                                  // 阶段门 [min,max)
      .range(6.0f)                                  // 目标距离门（≤ 才可选）
      .weight(ctx -> ctx.distSq() < 25 ? 3 : 1)     // 上下文权重
-     .requires(ctx -> !ctx.usedRecently(3))        // 准入谓词：候选招式看得见自己最近用过没有（第二十批）
+     .notRecent(3)                             // 防背板：一等的历史门（引擎看得见，挡空时能放开保底）
+     .requires(ctx -> ctx.usedRecently(2))       // 跨招组合才用这条（如"放过 A 才准放 B"）
      .anim("attack_smash")                         // 客户端动画名（字符串协议）
      .at(10, MoveTriggers.sound("entity.generic.explode"))
      .at(24, MoveTriggers.arcHit(6.5f, 90, 7.0f, 0.4f))   // 判定帧：扇形 AOE
@@ -476,3 +477,34 @@ protected void registerMoves(MoveSetBuilder m) {
 > "别拿同 UUID 两具实体做 UUID 查找"，具体机制不再断言。另修一处注释说谎：`withCandidate`
 > 并非"同实例返回 this 所以零分配"，产线 ctx 的 candidate 恒空、每候选确实新建一个 record。
 > 验证：build（`-Pgecko`）+ 自检 **81/81**（+10）+ audit **13** + GameTest **All 13 passed**。
+
+> 进度（2026-09-25 第二十二批·审查轮 11 处置）：✅ 六条全修，其中**两条是上一批我自己造成的**。
+> ①**活文档在教病灶**：§2.2 的 DSL 样例里"防背板"仍写着 `.requires(ctx -> !ctx.usedRecently(3))`——
+> 正是轮 10 判为缺陷、轮 11 要求改成一等入口的那一版（引擎看不见、挡空不放开）。样例已换成
+> `.notRecent(3)`，并把 `requires(ctx -> ctx.usedRecently(n))` 的定位收窄成"跨招组合专用"；
+> `ExampleColossus` 上那条注释同步。示范工程就是文档，注释与实际用法各说一半是这类 bug 的温床。
+> ②**保底重试不看历史到底挡没挡住**：`pick` 原先只要 `pool` 空就放开再跑一遍并打 debug
+> "move set empty with history gates on"——而"全表在 CD/距离不对"才是战斗里的常态，
+> 于是这句诊断在最常见路径上**说谎**，还每 tick 白跑一遍全表过滤。改成 collect 顺路数
+> `historyBlocked`，只有它 > 0 才重试、日志也才打（并把 F1 的理由挪到 `pick` 的 javadoc 上，
+> 上一批把那段说明随重构一起弄丢了）。
+> ③**F2 判据是同一次掷骰**：桩里循环 12 次却每轮 `RandomSource.create(7L)` 新建 ⇒ 12 个结果逐位相同、
+> `seen` 只能是 0 或 12，等于 1 个 bit，而且"必中"依赖 quake 恰好排在表尾——demo 包再加一招或给
+> `roar` 也挂 notRecent，判据方向就漂。改成直接断 `quakeDef.weight(far.withCandidate(quakeDef)) >= 1`，
+> 掷骰整段删掉。注释里"30 次"与代码里"12 次"自相矛盾也一并纠正。
+> ④`MoveDef#blockedByHistory` 补 `ctx.candidate() == this`：它是 public，名字读起来像"本招被历史挡了吗"，
+> 少了这道校验就会拿别的招的历史来禁本招（不该禁却禁了）。
+> ⑤`requireInt` 只落在两处站点 → 铺到 `weight.base`、`intAt`（duration/cooldown/post_invuln/at）、
+> `intPair`（phase/requires.phase_in/between）、`repeating` 三元组：这些地方原先 `getAsInt()` 会把
+> 10.5 静默截成 10，`true`/`"abc"` 抛的 gson 异常还会退化成正则里"不带字段名的解析炸了"。
+> ⑥构造期那条"每张招都挂满窗口"的 warn 改成**每个 Boss 种类只报一次**（惰性建表 ⇒ 一农场 N 条重复，
+> 同文件里建表失败那条特意做了去重，这条不能更吵）。
+> ⑦**上一批的过度声称已收回**：`MoveHistory` 里那个 `static {}` 断言，三个操作数都是编译期常量、
+> `if (false)` 被 javac 折掉，反编译出的 class **根本没有 `<clinit>`**——它不是运行期保险丝。
+> 改成 `layoutSane()` + 自检钉住（"改坏常数就自检红"才是真防线）。同批把环自检里那条
+> 改不出红的"重复记录不虚高"换成分水岭版：`roar` 是第 3 新 ⇒ 窗口 2 查不到、窗口 3 查得到，
+> counter 型实现当场红。另修 `valueOf` 上并列的两条 javadoc（第一条会被丢弃）。
+> **未登记的破坏面补记**：上一批把 `MoveDef#available()` 的契约从"含历史门"窄化成"不含"
+> （历史门移到 `blockedByHistory` 由 `MoveSet#pick` 管），当时只宣告了 `MoveDef.of` 签名变化。
+> 上游若照 498d295 写过"自己调 `available()` 就以为含 not_recent"的选招循环，升级后会**静默失去历史门**。
+> 验证：build（`-Pgecko`）+ 自检 **82/82**（+1：一条改不出红的判据被换成分水岭版，另加两条布局自洽）+ audit **13** + GameTest **All 13 passed**；那条构造期 warn 整轮只出现 1 次（去重生效）。

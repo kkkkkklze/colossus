@@ -410,23 +410,21 @@ public class ColossusGameTests {
             // === 降权不许压成禁选（审查轮 10 F2）===
             // demo 表在 8 格外的原始权重是 base 3 + distance_band(0)＝3，加上 recent_band(-6)＝-3；
             // 老写法会被 pick 的 w<=0 整条丢掉，于是"降权仍可选"其实是禁选——与 notRecent 撞成一件事。
-            // 判据：放过一次 quake 之后，远端 30 次掷骰里它仍要出现至少一次（修前恒 0 次）。
+            // 判据：放过一次 quake 之后，它在远端的权重仍要 >=1（不绕掷骰，理由见下面那段注释）
             var quake = Colossus.res("datapack_quake");
             helper.assertTrue(revived.moveSet().byId(quake) != null,
                     "demo 数据包的招该合进示范 Boss 的表（没合进来这条判据就是空转）");
             helper.assertTrue(revived.forceMove(quake), "先强制放一次 quake，把它写进历史");
             helper.runAfterDelay(45, () -> { // quake duration 40：等它收招，forceMove 才轮得到下一发
-                int seen = 0;
+                var quakeDef = revived.moveSet().byId(quake);
                 var far = new com.klze.colossus.move.AttackContext(revived, null, 100.0 * 100.0);
-                // 8 格外只剩 {roar:1, quake:1}（smash/sweep 被 range 挡，meteor/icering/flamewall
-                // 被 phase(1,9) 挡），quake 排在表尾 ⇒ 定种子第 2 掷必中；去掉 floor 后它是 -3 整个出局，
-                // 一次都不会中。两头都稳，不靠运气。
-                for (int i = 0; i < 12; i++) {
-                    var got = revived.moveSet().pick(far, id -> 0, net.minecraft.util.RandomSource.create(7L));
-                    if (got.isPresent() && quake.equals(got.get().id())) seen++;
-                }
-                helper.assertTrue(seen >= 1,
-                        "放过的 quake 在远端仍要被选得到（12 次里 0 次＝recent_band 把权重压成非正被整条丢掉）");
+                // 判据直接打在权重上，不绕掷骰（轮 11 #3）：同一个种子掷 12 次只是**同一个 bit**，
+                // 而"必中"还额外依赖池组成与表尾顺序——demo 包再加一招、或给 roar 也挂 notRecent，
+                // 判据方向就会漂（可能恒绿也可能恒红，且都跟地板逻辑无关）。
+                // 这里要证的只是"3 + (-6) 没把这条招挤出表"，那就断权重本身。
+                helper.assertTrue(quakeDef != null
+                                && quakeDef.weight(far.withCandidate(quakeDef)) >= 1,
+                        "放过的 quake 在远端权重必须 >=1（<1 就被 pick 整条丢掉＝「降权」其实是禁选）");
                 succeedClean(helper, boss, revived);
             });
         });

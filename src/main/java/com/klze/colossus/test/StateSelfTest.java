@@ -309,10 +309,20 @@ public final class StateSelfTest {
                         && h3.usedRecently(sweep, com.klze.colossus.move.MoveHistory.SLOTS));
 
         var h4 = new com.klze.colossus.move.MoveHistory();
+        h4.record(roar);
         h4.record(sweep);
         h4.record(sweep);
-        check("repeats don't inflate: the window is any-match, not a counter",
-                h4.usedRecently(sweep, 1));
+        // 轮 11 #5：原先那条只记两次同招，"这招还剩几次额度"的 counter 型实现也照样为真，改不出红。
+        // 位置语义的分水岭是【roar 是第 3 新】——窗口 2 查不到、窗口 3 查得到；
+        // 而 sweep 连放两次只各占一格，不会把 roar 挤得更远。
+        check("ring is positional, not a per-move counter",
+                h4.usedRecently(roar, 3) && !h4.usedRecently(roar, 2) && h4.usedRecently(sweep, 1));
+
+        // 槽宽/值域/格数的关系（轮 11：原先写的是 static 断言，被编译期常量折叠掉了＝没有保险）
+        check("ring layout is self-consistent (slot value fits 8 bits; 8 slots fill a long)",
+                com.klze.colossus.move.MoveHistory.layoutSane()
+                        && com.klze.colossus.move.MoveHistory.valueOf(roar) >= 1
+                        && com.klze.colossus.move.MoveHistory.valueOf(roar) <= 255);
         var h5 = new com.klze.colossus.move.MoveHistory();
         h5.record(roar);
         var restored = new com.klze.colossus.move.MoveHistory();

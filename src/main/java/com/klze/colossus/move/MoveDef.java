@@ -103,11 +103,14 @@ public final class MoveDef {
     }
 
     /**
-     * 历史门是否挡住本招。要求 {@code ctx} 是由 {@code ctx.withCandidate(this)} 得来的
-     * （{@link MoveSet#pick} 保证这一点）；否则查的是别的招的历史，结论无意义。
+     * 历史门是否挡住本招。
+     *
+     * <p>{@code ctx.candidate() != this} 时一律答"没挡住"：这方法是 public 的，名字读起来像
+     * "本招被历史挡了吗"，若拿别的招的历史来答就会<b>不该禁却禁了</b>；候选位空时同理
+     * （答"没挡住"是安全侧，答"挡住了"会让整招凭空消失）。{@link MoveSet} 的调用点自带 candidate。
      */
     public boolean blockedByHistory(AttackContext ctx) {
-        return this.notRecent > 0 && ctx.usedRecently(this.notRecent);
+        return this.notRecent > 0 && ctx.candidate() == this && ctx.usedRecently(this.notRecent);
     }
 
     /** 上下文权重（<=0 视为不可选）。 */

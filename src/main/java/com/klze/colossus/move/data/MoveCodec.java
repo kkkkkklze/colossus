@@ -170,7 +170,7 @@ public final class MoveCodec {
         // （审查轮 10 F1：环形窗口只由出招推进，等待不消解封锁）。
 
         WEIGHT_KEYS.put("base", el -> {
-            int base = (int) requireFloat(el.get("base"), "weight.base"); // 取成员值，不是整行对象
+            int base = requireInt(el.get("base"), "weight.base"); // 成员值而非整行；非整数拒（轮 11 #5）
             return ctx -> base;
         });
         WEIGHT_KEYS.put("distance_band", el -> {
@@ -304,7 +304,9 @@ public final class MoveCodec {
                 }
                 if (row.get("repeating") instanceof JsonArray three && three.size() == 3) {
                     out.add(com.klze.colossus.state.FrameRunner.Frame.repeating(
-                            three.get(0).getAsInt(), three.get(1).getAsInt(), three.get(2).getAsInt(),
+                            requireInt(three.get(0), "frames[" + i + "].repeating[0]"),
+                            requireInt(three.get(1), "frames[" + i + "].repeating[1]"),
+                            requireInt(three.get(2), "frames[" + i + "].repeating[2]"),
                             (boss, tick) -> trigger.execute(boss, tick)));
                 } else {
                     RepeatingWindow d = orThrow(decode(row.get("repeating"), RepeatingWindow.CODEC),
@@ -469,8 +471,9 @@ public final class MoveCodec {
         return el.getAsString();
     }
 
-    private static int intAt(JsonObject el, String field, int fallback) {
-        return el.has(field) ? el.get(field).getAsInt() : fallback;
+    /** 可选整数字段（缺省走 fallback）；给了值就必须是整数——10.5 静默截成 10 是行为说谎。 */
+    private static int intAt(JsonObject el, String field, int fallback) throws MoveDataException {
+        return el.has(field) ? requireInt(el.get(field), field) : fallback;
     }
 
     private static double requireFloat(JsonElement el, String field) throws MoveDataException {
@@ -482,8 +485,8 @@ public final class MoveCodec {
         if (!(el instanceof JsonArray arr) || arr.size() != 2) {
             throw new MoveDataException(field, "expected a 2-element array [min,max]");
         }
-        int a = arr.get(0).getAsInt();
-        int b = arr.get(1).getAsInt();
+        int a = requireInt(arr.get(0), field + "[0]");
+        int b = requireInt(arr.get(1), field + "[1]");
         if (b < a) throw new MoveDataException(field, "max < min: [" + a + "," + b + "]");
         return new int[]{a, b};
     }

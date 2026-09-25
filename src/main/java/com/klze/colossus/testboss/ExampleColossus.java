@@ -128,7 +128,9 @@ public class ExampleColossus extends ColossusBossEntity {
 
         // 横扫：贴身高权重（ctx 自适应选招）；第二十批再加一层" anti-repeat"——
         // 最近 3 次出招里放过横扫，这次就不许再放（连续横扫是这套招最容易被打背板的一招）。
-        // DSL 侧走 ctx.usedRecently(3)，JSON 侧走 requires.not_recent / weight.recent_band，同一份历史两种用法。
+        // DSL 侧走一等的 .notRecent(3)（引擎看得见它，挡空时才能放开保底）；
+        // ctx.usedRecently(n) 只留给跨招组合（"放过 A 才准放 B"），别拿它当防背板的正解。
+        // JSON 侧对应 requires.not_recent / weight.recent_band。
         m.move("sweep")
                 .duration(24).cooldown(40).range(4.5f)
                 .weight(ctx -> ctx.distSq() < 9 ? 5 : 1)

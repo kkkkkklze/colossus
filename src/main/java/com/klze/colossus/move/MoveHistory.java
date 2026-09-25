@@ -28,14 +28,18 @@ public final class MoveHistory {
     /** 值域上界（+1 之后）。必须严格小于 {@code 1L << BITS}，否则一个值会溅进相邻格。 */
     private static final long VALUE_MASK = 0x7FL;
 
-    static {
-        // 审查轮 10 F4：槽宽与值域原先毫无派生关系。日后有人把 VALUE_MASK 抬到 0xFF 又留着 +1，
-        // 值域就变成 1..256，256 溢出进邻格 ⇒ 出现"该禁却没禁"的假阴性，比原来的"多禁用"更糟。
-        // 这条绑死在类初始化上，改错立刻整个类加载失败，而不是悄悄退化。
-        if (VALUE_MASK + 1 >= (1L << BITS) || BITS * SLOTS != 64) {
-            throw new ExceptionInInitializerError("MoveHistory 槽宽/值域不匹配：BITS=" + BITS
-                    + " SLOTS=" + SLOTS + " VALUE_MASK=" + VALUE_MASK);
-        }
+    /**
+     * 槽宽、值域与格数的关系是否自洽。轮 10 F4 的原始诉求："日后有人把 VALUE_MASK 抬成 0xFF
+     * 又留着 +1，值域变成 1..256，256 会溅进相邻格 ⇒ 出现<b>该禁却没禁</b>的假阴性
+     * （比多禁一次更糟——那个方向至少还在 tell 的范围内）。"
+     *
+     * <p><b>实现选择的诚实交代</b>（轮 11 抓出来的过度声称）：原先这里写的是 {@code static {}} 断言，
+     * 但三个操作数都是编译期常量，javac 把 {@code if (false)} 整段折掉——反编译出的 class 里
+     * 根本没有 {@code <clinit>}，它不是运行期保险丝。改成这个方法、由 {@code StateSelfTest} 钉住：
+     * 真正防回归的是"改坏常数就自检红"，不是这段代码自己会炸。
+     */
+    public static boolean layoutSane() {
+        return VALUE_MASK + 1 < (1L << BITS) && BITS * SLOTS == 64;
     }
 
     private long ring;
@@ -69,8 +73,10 @@ public final class MoveHistory {
     /** 清空（例如换阶段后不想带着旧账）。 */
     public void clear() { this.ring = 0L; }
 
-    /** 只数 path 段：同 ns 下 {@code colossus:smash} 与 {@code smash} 必须视为同一招。 */
-    /** 该招在环里长什么样（诊断与测试用；0 被刻意留给空槽，所以任何招都不会等于 0）。 */
+    /**
+     * 该招在环里的槽值。只数 path 段（同 ns 下 {@code colossus:smash} 与 {@code smash} 视为同一招），
+     * 并刻意 +1 把 0 留给空槽 ⇒ 值域 {@code 1..128}，任何招都不会等于 0（空槽与"某招"不可能撞值）。
+     */
     public static long valueOf(ResourceLocation id) {
         return (id.getPath().hashCode() & VALUE_MASK) + 1L; // +1：0 留给空槽
     }
