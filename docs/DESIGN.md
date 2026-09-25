@@ -147,7 +147,7 @@ protected void registerMoves(MoveSetBuilder m) {
 - 尸体碎块：纯客户端实体，不进 squad/bar。
 
 ### 6.3 环境层（`env`），按性价比排序
-1. **TelegraphZone**（两形态）：数据形态（BR IceSpike：区域由 delay 标量推导，零包，到期 AABB 一次性结算）与实体形态（CAT LightningArea：可扩散、周期结算）。触发时刻由 `MoveDef` 帧表声明——BR 依赖的 GeckoLib 关键帧指令在我们的状态机里有现成等价物。客户端契约：`ZoneSync{x,y,z,sx,sz,rot,color,ticks}` + `RenderLevelStageEvent` 画贴地 quad。
+1. **TelegraphZone**（两形态）：数据形态（BR IceSpike：区域由 delay 标量推导，零包，到期 AABB 一次性结算）与实体形态（CAT LightningArea：可扩散、周期结算）。触发时刻由 `MoveDef` 帧表声明——BR 依赖的 GeckoLib 关键帧指令在我们的状态机里有现成等价物。客户端契约（第二十四批改过）：轮廓形状住在 Boss 的 `DATA_TELEGRAPHS`（一份`{views:[{几何…, id, start, end}]}` 的 SynchedEntityData 标签），渲染在 `RenderLevelStageEvent` 画贴地 quad，粒子档走 `addAlwaysVisibleParticle`。旧的 `ZoneSync` 单发包已删除——理由见 §7 第二十四批。
 2. **ArenaBlockAccess**：`clearBox(sweep, filter)`（NagaSmash 形）+ `applyPattern(offsetTable, facing, state)`（Yeti BREAK_1..4 形）+ mobGriefing/方块 tag 豁免门控。
 3. **结构保护 + POI 解锁**：`StructureDestructionEvents` 近乎可照搬；"已击败"用 POI 查询而非读结构 NBT（成本最低）；`getAllStructuresAt` 结果按 chunkKey 缓存。
 4. **ArenaSession 最小闭环**：closeOffExit 封路（InfernalDragon 形）+ 团灭弹出 + **加载闸门**（arena 未加载则相位不推进——Kraken 教训）。
@@ -327,7 +327,7 @@ protected void registerMoves(MoveSetBuilder m) {
 > 另记一次工具性自伤：用 python `s.replace(切片, 新块)` 时切片取成空串，`replace('', x)` 会把新块插进**每个字符之间**，
 > `MoveCodec.java` 一度变成 47 万行——已按该文件最后一次提交恢复（无未提交工作丢失），坏文件留在 `/tmp/MoveCodec.corrupted.bak`。
 > 规矩：**改文件别用 index 切片 + 全局 replace，用精确 Edit**。
-> 边界：telegraph 的**客户端轮廓**不持久化（重载后圈子的伤害照落、轮廓消失），要一起恢复得让 ZoneSync 也进 NBT，记 v0.3。
+> 边界：telegraph 的**客户端轮廓**不持久化（重载后圈子的伤害照落、轮廓消失），要一起恢复得让 ZoneSync 也进 NBT，记 v0.3。>【第二十四批已做：轮廓改成 `DATA_TELEGRAPHS` 投影 + 绝对 gameTime，`ZoneSync` 包整个删掉。】
 
 > 进度（2026-09-25 第十七批·审查轮 7 处置 + 测试隔离面重构）：✅ addon 与渲染层的门全部改读同步数据
 > （`attackAnimName()`/`isAttacking()`），动画名新增 `DATA_ATTACK_ANIM` 由服务端下发——
@@ -352,7 +352,7 @@ protected void registerMoves(MoveSetBuilder m) {
 > 验证：build（含 `-Pgecko` addon 编译 + `jarColossusGecko`）+ **62/62** + audit **11** +
 > GameTest **All 11 required tests passed**，且**连跑四轮全绿**。
 > 遗留：多人客户端动画表现仍无法自证（起不了真客户端，addon 无 geo 资产）；`requires`/`weight`
-> 谓词面扩展、ZoneSync 入 NBT（重载后预警轮廓消失但伤害照落）、`not_recent`/连招历史、
+> 谓词面扩展、~~ZoneSync 入 NBT（重载后预警轮廓消失但伤害照落）~~【第二十四批已做，见 §7】、> `not_recent`/连招历史（第二十一~二十批已做）、
 > BossBar 自定义纹理消费者、许可证裁定（仍 ARR）、`build/libs/examplemod-1.0.0.jar` 待清。
 
 > 进度（2026-09-25 第十八批·审查轮 8 处置）：✅ 修掉一条 P1 —— **已结算尸体过档变 1 血不死雕像**
@@ -425,7 +425,7 @@ protected void registerMoves(MoveSetBuilder m) {
 > 的"可重入"只限 `colossus_dying=true` 的续演路径（已结算尸体那档不进演出，残留排期是死数据）。
 > 遗留新增：`DATA_DEATH_TICK` 是 entityData 不落盘 ⇒ 重载后的尸体在 ≤20t 里 `deathTick()==0`，
 > 客户端**没有死亡动画**（站着消失）。修前是 1 血雕像，所以不算回归，但这条要真做就得让 ZoneSync
-> 那类"重载补状态"的通道把死亡帧也带上，与预警轮廓入 NBT 记同一笔账（§3）。
+> 那类"重载补状态"的通道把死亡帧也带上，与预警轮廓入 NBT 记同一笔账（§3）。>【第二十四批把"轮廓"那一半做掉了——做法正是"塞进 SynchedEntityData 让 vanilla 补包"；> `DATA_DEATH_TICK` 那一半仍欠，同一套路可以直接复用它，见 §7 第二十四批的"未做"。】
 > 验证：build（`-Pgecko`）+ 自检 **69/69** + audit **12** + GameTest **All 12 passed**（连跑三轮稳定）。
 
 > 进度（2026-09-25 第二十批·not_recent 招式历史，v10 的第一批落地）：✅ v10 重派已落盘并被我抽查过
@@ -539,3 +539,54 @@ protected void registerMoves(MoveSetBuilder m) {
 > **以及轮 11 的一条口径**：`blockedByHistory` 补 `candidate == this` 当时在库内不可达（唯一调用点自带 candidate），
 > 那是 API 加固而不是缺陷；代价是下游漏传 candidate 时**静默失去历史门**，javadoc 已把这层代价说破。
 > 验证：build（`-Pgecko`）+ 自检 **84/84**（+2 条整数判整用例）+ audit **13** + GameTest **All 13 passed**。
+> 进度（2026-09-25 第二十四批·v11 落地：危险区轮廓改成"可持久 + 可重放"的同步投影 + 审查轮 13 处置）：
+> ✅ **轮廓不再是"发一次就不管"的包**。v11 取证给的不是"抄谁"，而是一个成本判据：
+> `ServerEntity#sendPairingData`（1.20.1 的 `ServerEntity.java:237-239`）会**自动**给新追踪者补发一份
+> `ClientboundSetEntityDataPacket` 全量快照，而 `sendDirtyEntityData:294` 每次发包都刷新
+> `trackedDataValues`——所以"形状塞进 `SynchedEntityData`"这一条就同时买齐了
+> 中途进场、换维度/重进世界、存档重载三种补状态，**一行自定义补发包都不写**。
+> 落地形态：`DATA_TELEGRAPHS`（`COMPOUND_TAG`，`{views:[{几何…, id, start, end}]}`），
+> 计时用**绝对 `gameTime`**（`handleSetTime:912` 把服务端 `level.getGameTime()` 原样发给客户端，
+> `ClientLevel.tickTime:225` 本地自增 ⇒ 双端同一时基，晚到的人看到的是"这块地已经烧掉一半"而不是从头再亮）。
+> 删掉的东西与留下的东西一样重要：`ZoneSyncS2C` 整条包类型 + `broadcastZone` + `TelegraphZone.broadcast()`
+> 全删（轮 16 立的"替换决策路径必须同一次删掉旧分支"），通道 `PROTOCOL` 从 1 抬到 2——
+> 消息表少一条会让 Forge 的 discriminator **下标**整体前移，老客户端按旧表解码就是静默错位，
+> 版本不匹配宁可在握手期明确断开。
+> ✅ **三处单边失败被绑成原子**（审查自己抓出来的，不是代理提的）：投影容量 8 与待办队列容量 32
+> 各自独立 ⇒ 原先"先画圈再排队"在队列满时留下一块永不爆炸的假警告。`scheduleWork` 改回 `boolean`，
+> `MoveTriggers.telegraph` 变成"先登记轮廓，排队失败就 `hideTelegraph(id)` 撤回；投影已满则整发放弃"——
+> 方向选得保守：**宁可少一招，不发没预警的伤害**。`deathPending` 也进了 `showTelegraph` 的门，
+> 且 `onDeathSequenceStart` 清待办队列时同步清投影（那圈本来就是会被 `ZoneWork` 判弃的）。
+> ✅ 客户端侧：`TelegraphClient` 的 `Live` 从"本地倒计时"改成"绝对起止 + 按 `(bossId,viewId)` 键"
+> （两条 Boss 的视图序号会重复 ⇒ 键必须带宿主）；数据源从"包"改成"每客户端 tick 读投影"，
+> 用 `EntityJoinLevelEvent`/`EntityLeaveLevelEvent`（`ClientLevel.java:336`/`:972` 实测双端都发）维护名单，
+> 判"要不要重建"用**tag 实例引用比较**（`assignValues` 每次补包都换新实例 ⇒ O(1) 且恰好够用），
+> 弱引用兜住"断线时 vanilla 不逐个发离场事件"那一档。粒子改 `addAlwaysVisibleParticle`——
+> 旧写法在 32 格外必然画不出来（`LevelRenderer.java:2511` 的 `distanceToSqr > 1024.0D → null`，
+> `:2514` 还会被玩家"粒子=最少"整批丢），而危险区恰恰是大半径演出。
+> ✅ 血条消费端两条：①`setVisible(false)` 这条**第三条路径**原先没人清客户端镜像
+> （vanilla 那儿只发自己的 REMOVE 包、不调 `removePlayer`，`ServerBossEvent.java:121-130`），
+> 现在样式/护盾的补齐与清零各收成一个入口（`pushMirrorTo`/`clearMirrorFor`），进视角/转可见/离场/隐藏
+> 四条路共用；②顺带修掉一条更静的错：补快照时读的是 `DirtyMeter.lastSent()`，而 `invalidate()` 之后
+> 那是"从未发过"的哨兵 NaN，`ShieldBars.set` 把非有限值当"没有盾"删项 ⇒ 那句"晚入场也要拿到当前真值"
+> 的注释与实际效果相反。新增 `DirtyMeter.remember()` 把"我已经发了这个值"记进账，三条不变量都进了自检。
+> ✅ 审查轮 13 的 11 条见 `docs/代码审查-v0.2.md`：`STRICT_INT` 补非有限/int 域两格 + 布尔那一格
+> 挪到 gson 侧（`decodeRecord`）、四个解码器接全路径 field、DSL 的 `phase`/`duration` 补上与 JSON 同一条门、
+> 去重表键加"是哪张表"、`pick` 的纯函数前置契约写进能被看见的地方、`STRICT_INT` 搬进
+> `com.klze.colossus.data.JsonCodecs`（顺带铺掉全工程最后一个 `Codec.INT`）、自检类从 jar 里排掉。
+> ⚠ **本轮自己埋又自己抓到的一处**：把回执字段名换成全路径时，我把路径串进了**查找键**
+> （`requireString(el, "frames[0].trigger.id")` 查不到成员 `id`），`event`/`once`/`zone.kind`/`effect.kind`
+> 四处当场全坏——自检第一次跑就红。纪律：**"让报错更详细"的改动动的是查表键**，
+> 改完必须立刻看"该能解的仍解得开"那一半，只跑"该拒的确实拒了"抓不到它。
+> 未做（记 v0.3）：`DATA_DEATH_TICK` 仍不落盘（同一套"投影进 entityData"可直接复用）；
+> 大半径轮廓仍受**实体追踪半径**限制（`ChunkMap.java:1388` 的平方距离判据 + `viewDistance*16`），
+> 真要跨区块可见得把几何做成 chunk 级叠加层（v11 A1-② 的 L2Hostility 三件套，成本一档）；
+> 多条同时爆炸的**跨招互斥词汇**仍缺（`recent_band` 只看候选自己）；BossBar 自绘贴图的
+> 实际观感未验（`blitNineSliced`/`enableScissor` 的调用序列是"API 存在 + 我推得的"，v11 §五-6 已标实验项）；
+> 许可证仍 ARR、`build/libs/examplemod-1.0.0.jar` 仍待清。
+> 验证：build（`-Pgecko`）+ 自检 **100/100**（+16，含轮 13 那 11 条的正反两半）+ audit **14**
+> （地板从 3 抬到 14，跟着声明数走）+ `runGameTestServer` **All 14 required tests passed**（两轮）。
+> 新桩 `telegraphProjectionPersistsAndExpires` 证的是"数据穿过存档、按绝对时刻到期、满了会拒、
+> 读档后序号续得上"；日志里那 13 条 `telegraph projection full` 是容量门的实证（20 次请求 ⇒ 7 成 13 拒）。
+> **仍未验**：客户端表现本身（起不了真客户端）——本批改的三条"看得见"的收益（中途进场、重进世界、
+> 32 格外轮廓）只有服务端与源码级证据，画面复验仍挂在 playtest-bridge 那条账上。

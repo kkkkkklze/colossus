@@ -132,6 +132,50 @@ final class MoveJsonSelfTest {
                 decodesAtCap("weight", "{'kind':'base','base':1}", 16));
         check.accept("16 requires entries still decode (cap boundary is inclusive)",
                 decodesAtCap("requires", "{'phase_in':[0,9]}", 16));
+        // 轮 13 P3-6：上面那两条补了 weight/requires 的另一半，frames/深度这两道封顶原先
+        // 仍只钉了"超了要拒"——把 `>` 写成 `>=` 时它们全绿，所以各补一条"恰好等于上限能过"。
+        check.accept("64 frames still decode (frame cap boundary is inclusive)", decodes(framesOf(64)));
+        check.accept("8 nesting levels still decode (depth cap boundary is inclusive)",
+                decodes(nestedOnce(8)));
+
+        // === 轮 13 P1-1：整数闸门剩下的两格（布尔被 DFU 折成 1/0、超界被 JLS 窄化饱和）===
+        // 这两条都是"原先静默、现在拒"：`"add": true` 以前解成 1，`"ticks": 1e10` 以前饱和成 2147483647
+        // 且不报错——一条权重饱和成 2^31-1 就是那一招每次选招必中、其余招永久饿死。
+        check.accept("a boolean where a number belongs is rejected (DFU would fold it to 1/0)",
+                rejects("{ 'id':'b', 'duration':10, 'weight':[{'kind':'distance_band','min':0.0,"
+                        + "'max':6.0,'add':true}],'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }",
+                        "布尔"));
+        check.accept("out-of-int-range tick count is rejected instead of saturating to 2^31-1",
+                rejects("{ 'id':'b', 'duration':10, 'frames':[{'at':2,'trigger':{'type':'colossus:telegraph',"
+                        + "'zone':{'kind':'circle_ahead','radius':3.0},"
+                        + "'effect':{'kind':'freeze','ticks':1e10}}}] }", "int range"));
+        check.accept("the hand-rolled integer sites reject booleans too (no second rule per field)",
+                rejects("{ 'id':'b', 'duration':10, 'cooldown':true,"
+                        + "'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }",
+                        "expected a number"));
+        // 轮 13 P2-3：distance_band 的 min/max 原先没有任何形态校验——写反是一条永不匹配的降权项
+        check.accept("inverted distance band is rejected (a band that never matches is a silent no-op)",
+                rejects("{ 'id':'b', 'duration':10, 'weight':[{'kind':'distance_band','min':6.0,"
+                        + "'max':2.0,'add':10}],'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }",
+                        "max < min"));
+        check.accept("negative distance lower bound is rejected",
+                rejects("{ 'id':'b', 'duration':10, 'weight':[{'kind':'distance_band','min':-2.0,"
+                        + "'max':6.0,'add':10}],'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }",
+                        "负数"));
+        // 轮 13 P2-1：拒因要能指到第几条，否则 16 项的表只能靠二分找行
+        check.accept("a bad second weight entry names its index in the report",
+                rejects("{ 'id':'b', 'duration':10, 'weight':[{'kind':'base','base':1},"
+                        + "{'kind':'base','base':2.5}],"
+                        + "'frames':[{'at':2,'trigger':{'type':'colossus:event','id':'x'}}] }", "weight[1]"));
+    }
+
+    /** 只问"这条能不能解出来"（封顶类的另一半：等于上限必须过）。 */
+    private static boolean decodes(String squotedJson) {
+        try {
+            return MoveCodec.decodeMove("cap", NS, obj(squotedJson)) != null;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /** 16 条应当能解出来：返回 true 表示解码成功且条目数没被偷偷裁掉。 */

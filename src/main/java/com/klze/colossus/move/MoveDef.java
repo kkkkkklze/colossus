@@ -44,6 +44,17 @@ public final class MoveDef {
             Predicate<AttackContext> extraCheck, int notRecent, int postAttackInvuln,
             List<FrameRunner.Frame<com.klze.colossus.entity.ColossusBossEntity>> frames) {
         this.id = id;
+        // 时长与阶段带是**准入形状**的一部分，不是可有可无的数值：写反的阶段带（[3,1)）
+        // 是一条恒假门——这招永远不可选，而 available() 返回 false 连 historyBlocked 都不计，
+        // 于是全表扫完一点日志都没有（轮 13 P2-2）。JSON 侧早就拒了（decodeMove 查 maxPhase<=minPhase、
+        // duration<1），DSL 侧原先一个都不查——同一个构造器兜住两条入口才是本仓的口径。
+        if (duration < 1) {
+            throw new IllegalArgumentException("move " + id + ": duration must be >= 1 tick, got " + duration);
+        }
+        if (maxPhase <= minPhase) {
+            throw new IllegalArgumentException("move " + id + ": phase band must satisfy max > min, got ["
+                    + minPhase + "," + maxPhase + ")");
+        }
         this.duration = duration;
         this.cooldownTicks = cooldownTicks;
         this.minPhase = minPhase;
@@ -72,7 +83,8 @@ public final class MoveDef {
      *
      * <p>刻意只多一个工厂、不多一套模型：两条路产出<b>同一个不可变 {@code MoveDef}</b>，
      * 帧执行、选招准入、血条解析全部共用——不出现"JSON 招式少半边能力"的特例。
-     * 值域由本构造器兜底（anim 非空、{@code notRecent} 在 0..8），调用方另给字段级回执。
+     * 值域由本构造器兜底（anim 非空、{@code notRecent} 在 0..8、{@code duration >= 1}、
+     * 阶段带 {@code max > min}），调用方另给字段级回执。
      */
     public static MoveDef of(ResourceLocation id, int duration, int cooldownTicks, int minPhase, int maxPhase,
                              float range, String animName, ToIntFunction<AttackContext> weightFn,

@@ -253,6 +253,14 @@ tasks.register('colossusSelfTest', JavaExec) {
     mainClass = 'com.klze.colossus.test.StateSelfTest'
 }
 
+// 纯自检类不进发布产物（轮 13 P3-2：文档原先写的是"colossusSelfTest 不进产物"，字面不成立——
+// 这两个类住在 src/main 下，会被编进 jar，dev-only 的是**任务**不是**类**）。
+// 排除是安全的：colossusSelfTest 走 sourceSets.main.runtimeClasspath（classes 目录，不读 jar），
+// GameTest/运行期也不引用 test 包。留着它们等于往产线塞一套能往 stdout 打 PASSED 的第二入口。
+tasks.named('jar') {
+    exclude 'com/klze/colossus/test/**'
+}
+
 // GameTest 声明数下限门（姊妹工程实践：gameTestServer 零测试时打印 "All 0 passed" 并退出 0——
 // 假绿通道，必须由静态门守住"回归条数不许掉下去"）。
 tasks.register('gameTestAudit') {
@@ -263,7 +271,7 @@ tasks.register('gameTestAudit') {
         fileTree('src/main/java').matching { include '**/*.java' }.each { f ->
             f.eachLine { l -> if (l.trim().startsWith('@GameTest(')) count++ }
         }
-        int floor = 3
+        int floor = 14 // 跟着声明数走：加了桩就抬上来，删桩必须同时改这里（这条门的全部意义就是"不许无声下跌"）
         if (count < floor) {
             throw new GradleException("gameTestAudit: only " + count + " @GameTest declared, floor is " + floor + " — 回归条数不许无声下跌")
         }

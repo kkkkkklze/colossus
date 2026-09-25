@@ -18,12 +18,20 @@ public final class MoveSet {
     private final com.klze.colossus.entity.ColossusBossEntity boss;
 
     /**
-     * 设计意图提示的去重表（轮 11 加、轮 12 改）：种类 → 上次 warn 时的<b>表版本号</b>。
+     * 设计意图提示的去重表（轮 11 加、轮 12 改、轮 13 补两处契约）：
+     * 键＝<b>种类 + 表形状</b>，值＝上次 warn 时的表版本号。
      *
      * <p>为什么按版本而不是"每种只报一次"：作者的实际循环是"改 JSON → {@code /reload} → 看日志"，
      * 而 {@code moveSet()} 是按 {@code MoveDataRegistry#revision()} 重建的。只按种类去重且永不复位，
      * 第一次 warn 之后同类 Boss 无论 reload 多少次都不再 warn——包括"这次才改坏"的那一次。
-     * 种类数有限，这张表不会无界增长。
+     *
+     * <p>为什么键里还要带表形状（轮 13 P3-4）：只按种类 ⇒ <b>同一版本下任何一张表先 warn，
+     * 就把真表的那点额度吃掉了</b>。合成表（自检/测试造的 {@code gatedOnly}）与真实表就这么撞过。
+     * 条数 + 首招 id 是成本最低的"这不是同一张表"信号，仍然不会无界增长（组合数受表种类数约束）。
+     *
+     * <p>检查与写入放在同一个 {@code synchronized} 块里：{@code Collections.synchronizedMap} 只保证
+     * 单步原子，{@code get}+{@code put} 这种复合操作要调用方自己上锁（今天只有服务端线程走到这里，
+     * 但这张表是 static 的，等着被第二个调用方踩）。
      */
     private static final java.util.Map<String, Long> FULLY_GATED_WARNED_AT =
             java.util.Collections.synchronizedMap(new java.util.HashMap<>());
@@ -31,17 +39,24 @@ public final class MoveSet {
     MoveSet(com.klze.colossus.entity.ColossusBossEntity boss, List<MoveDef> moves) {
         this.boss = boss;
         this.moves = List.copyOf(moves);
-        String warnKey = boss != null ? String.valueOf(boss.getBossId()) : "<no-boss>";
+        String warnKey = (boss != null ? String.valueOf(boss.getBossId()) : "<no-boss>")
+                + "/" + this.moves.size()
+                + (this.moves.isEmpty() ? "" : "/" + this.moves.get(0).id());
         long tableRevision = com.klze.colossus.move.MoveDataRegistry.revision();
         // 表里每条都挂上不小于表长的历史窗口 ＝ 作者其实想要的是"轮换"而不是"防重复"。
         // 引擎有保底（见 pick），不会因此空转，但这条设计意图值得说一句——静默兜底最容易让人
         // 一辈子没发现自己写的窗口等于禁用。
         if (!this.moves.isEmpty() && this.moves.stream()
-                .allMatch(m -> m.notRecent() >= this.moves.size())
-                && !Long.valueOf(tableRevision).equals(FULLY_GATED_WARNED_AT.get(warnKey))) {
-            FULLY_GATED_WARNED_AT.put(warnKey, tableRevision);
-            com.klze.colossus.Colossus.LOGGER.warn("每张招都挂 notRecent>=表长({})——选招将长期依赖"
-                    + "「挡空后放开历史门」的保底；要真轮换请显式设计冷却/权重", this.moves.size());
+                .allMatch(m -> m.notRecent() >= this.moves.size())) {
+            boolean say;
+            synchronized (FULLY_GATED_WARNED_AT) {
+                say = !Long.valueOf(tableRevision).equals(FULLY_GATED_WARNED_AT.get(warnKey));
+                if (say) FULLY_GATED_WARNED_AT.put(warnKey, tableRevision);
+            }
+            if (say) {
+                com.klze.colossus.Colossus.LOGGER.warn("每张招都挂 notRecent>=表长({})——选招将长期依赖"
+                        + "「挡空后放开历史门」的保底；要真轮换请显式设计冷却/权重", this.moves.size());
+            }
         }
     }
 
@@ -83,6 +98,14 @@ public final class MoveSet {
      * 光等待不消解封锁，所以引擎看不见历史门时挡空就是<b>不随时间愈合</b>的空窗——
      * 示范表实测能干站 70~140 tick，每条招都挂不小于表长的窗口时是永久死锁。
      * 阶段门/距离门/自定义谓词/冷却/权重≤0 第二遍照样硬拒，不会把"阶段未到"的招放出来。
+     *
+     * <p><b>前置契约（轮 13 P3-5）</b>：本方法会对<b>同一张表求值两遍</b>，前提是
+     * {@code cooldownLeft} 与各招的 {@code weight}/{@code requires} 都是 {@code ctx} 的纯函数。
+     * 下游给一个 {@code ctx -> random.nextFloat() < 0.5f} 的谓词，就能造出
+     * "historyBlocked>0 而第二遍仍是空池"——那时上面那句 debug 日志与"重试必非空"都不成立。
+     * 库内三处（{@code MoveCodec} 的条件/权重、实体的 {@code this::cooldownLeft}）都核过是纯的；
+     * 这条写在这里是因为 {@link MoveSetBuilder.MoveBuilder#requires} 与
+     * {@link MoveSetBuilder.MoveBuilder#weight} 都是 public 扩展点。
      */
     public java.util.Optional<MoveDef> pick(AttackContext ctx, ToIntFunction<ResourceLocation> cooldownLeft,
                                             RandomSource random) {

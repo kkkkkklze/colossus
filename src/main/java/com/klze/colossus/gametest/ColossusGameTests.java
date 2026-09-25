@@ -715,6 +715,71 @@ public class ColossusGameTests {
     }
 
     /**
+     * 危险区投影的可持久／可重放回归（第二十四批，判据取自 v11 取证 A2/A3）：
+     * 轮廓不再是"发一次就不管"的自定义包，而是 Boss 同步数据里的一份投影，
+     * 所以这里问的是<b>数据本身</b>：穿不穿得过存档、绝对时刻对不对、满了拒不拒、到期清不清。
+     *
+     * <p>为什么不能只靠自检：投影的三条好处（中途进场补包、重进世界自愈、重载后进度不重播）
+     * 里前两条由 vanilla 的 {@code ServerEntity#sendPairingData} 保证，本桩证不到发包，
+     * 但<b>第三条（存档）与时刻口径</b>是它的地盘——旧写法把"还剩几 tick"重当成年龄，
+     * 正是第十六批待办队列踩过的同一个坑。
+     */
+    @GameTest(template = YARD, timeoutTicks = 300, batch = "telegraph")
+    public void telegraphProjectionPersistsAndExpires(GameTestHelper helper) {
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        var zone = new com.klze.colossus.env.TelegraphZone(4.5, 3.0, 4.5, 6.0, 1.5, 30, 0xFF4040, "dust");
+
+        int first = boss.showTelegraph(zone, 40);
+        helper.assertTrue(first >= 0, "showTelegraph 该登记成功并回一个 id（-1＝第一道门就把招堵死了）");
+        var decoded = boss.telegraphViews();
+        helper.assertTrue(decoded.size() == 1,
+                "登记的那条必须能从同步数据里读回来（读不回＝客户端根本没东西可画）");
+        var got = decoded.get(0);
+        helper.assertTrue(Math.abs(got.zone().radiusXZ() - 6.0) < 1e-9 && "dust".equals(got.zone().visual())
+                        && got.zone().warnTicks() == 30,
+                "几何／样式／warn 都要穿过 entityData 原样回来，实际 warn="
+                        + got.zone().warnTicks() + " visual=" + got.zone().visual()
+                        + "（warn 丢了＝lifetime 少 30t，圈先消失、伤害后落地）");
+        helper.assertTrue(got.endGameTime() - got.startGameTime() == 40,
+                "寿命要按给定的 tick 记，实际 " + (got.endGameTime() - got.startGameTime()));
+
+        // 封顶：填到上限后必须拒，且拒的是"多出来的那些"而不是悄悄挤掉旧的
+        int refused = -2;
+        for (int i = 0; i < 20; i++) refused = boss.showTelegraph(zone, 40);
+        helper.assertTrue(boss.activeTelegraphCount() == ColossusBossEntity.MAX_ACTIVE_TELEGRAPHS,
+                "在途条数要恰好停在上限，实际 " + boss.activeTelegraphCount());
+        helper.assertTrue(refused == -1, "上限之后必须返回 -1 让调用方放弃整发（否则就是没预警的伤害）");
+
+        var tag = new net.minecraft.nbt.CompoundTag();
+        boss.saveWithoutId(tag);
+        boss.discard(); // 原实例退场：否则"读回来的那份"可能仍在被活体 tick 改
+        ColossusBossEntity revived = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        revived.load(tag);
+        helper.assertTrue(revived.activeTelegraphCount() == ColossusBossEntity.MAX_ACTIVE_TELEGRAPHS,
+                "投影要随实体落盘：读档后条数应仍是上限，实际 " + revived.activeTelegraphCount()
+                        + "（0＝entityData 不落盘而读侧没重建）");
+        revived.hideTelegraph(1);
+        int afterLoad = revived.showTelegraph(zone, 40);
+        helper.assertTrue(afterLoad > ColossusBossEntity.MAX_ACTIVE_TELEGRAPHS,
+                "读档后序号必须续在存档里最大 id 之后，实际拿到 " + afterLoad
+                        + "（回到小号会和还在世的轮廓撞号：撤一条会撤错、客户端会提前覆写）");
+
+        helper.runAfterDelay(50, () -> {
+            long mine = revived.telegraphViews().stream()
+                    .filter(v -> v.id() <= ColossusBossEntity.MAX_ACTIVE_TELEGRAPHS).count();
+            helper.assertTrue(mine == 0,
+                    "自己登记的轮廓（id<=8）都该按绝对时刻到期，还剩 " + mine
+                            + " 条（永不消失的圈＝tell 在撒谎；now=" + helper.getLevel().getGameTime() + "）");
+            helper.assertTrue(revived.telegraphSnapshot().contains("views")
+                            == (revived.activeTelegraphCount() > 0),
+                    "同步快照要与服务端在途集合同进退（快照空而集合非空＝客户端少画，反之多画）");
+            succeedClean(helper, boss, revived);
+        });
+    }
+
+    /**
      * 登记期校验回归（审查 P1#3）：坏窗口必须 build 招式表时就抛——
      * 留到出招那 tick 抛＝炸在 serverAiStep 里，持久 Boss 变崩溃循环。
      */

@@ -34,6 +34,19 @@ public final class DirtyMeter {
         this.lastSent = UNSET;
     }
 
+    /**
+     * 只记账、不判脏（第二十四批补）。
+     *
+     * <p>为什么需要它：{@code ColossusBossEvent#pushMirrorTo} 是"给一个人补全包快照"，
+     * 它发出去的值<b>就是</b>当前真值，但那里不能走 {@link #changedAndRemember}——
+     * 快照与上一次记账值恰好相等时它会返回 false，而调用方已经发了包，账就对不上；
+     * 反过来先 {@code invalidate()} 再读 {@link #lastSent()} 会拿到 NaN（旧写法正是这么错的）。
+     * 显式 remember 把"我已经发了这个值"这件事记下来，两条不变量同时成立。
+     */
+    public void remember(float value) {
+        if (Float.isFinite(value)) this.lastSent = value;
+    }
+
     /** 当前记账值（NaN=从未发过）。 */
     public float lastSent() {
         return this.lastSent;

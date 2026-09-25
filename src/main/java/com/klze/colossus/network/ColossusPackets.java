@@ -19,11 +19,19 @@ import java.util.function.Supplier;
  * 框架网络层（Forge 1.20.1 SimpleChannel，可选通道）。
  *
  * <p>铁律（六样本一致验证）：战斗状态本身零自定义包——全部走 SynchedEntityData；
- * 这里只有四类旁路：血条样式、客户端演出事件、音乐开关、危险区同步 + 通用 cue。
+ * 这里只有六条旁路：血条样式、护盾镜像、客户端演出事件、音乐开关、通用 cue、全局进度快照
+ * （第二十四批删掉了第七条 {@code ZoneSync}：危险区轮廓改住 {@code DATA_TELEGRAPHS}，
+ *  由 vanilla 给新追踪者自动补包，见 {@code ColossusBossEntity#showTelegraph}）。
  */
 public final class ColossusPackets {
 
-    private static final String PROTOCOL = "1";
+    /**
+     * 协议号（第二十四批 1→2）：消息表整条删除会让 Forge 的 discriminator <b>下标</b>整体前移，
+     * 老客户端把后来的包按旧表解码＝静默错位。版本号不匹配会在握手期就明确断开
+     * （{@code acceptMissingOr} 仍放行"根本没装 mod"的对端，原版服照进），
+     * 比在局中解出一坨垃圾好。
+     */
+    private static final String PROTOCOL = "2";
     /**
      * 可选通道（47.4.23 sources 实测）：用官方助手 {@code acceptMissingOr}——
      * 对端缺通道（ABSENT.version()）或连原版服（ACCEPTVANILLA）都放行，
@@ -50,8 +58,6 @@ public final class ColossusPackets {
                 BossVisualEventS2C::encode, BossVisualEventS2C::decode, BossVisualEventS2C::handle);
         CHANNEL.registerMessage(index++, MusicToggleS2C.class,
                 MusicToggleS2C::encode, MusicToggleS2C::decode, MusicToggleS2C::handle);
-        CHANNEL.registerMessage(index++, ZoneSyncS2C.class,
-                ZoneSyncS2C::encode, ZoneSyncS2C::decode, ZoneSyncS2C::handle);
         CHANNEL.registerMessage(index++, CueS2C.class,
                 CueS2C::encode, CueS2C::decode, CueS2C::handle);
         CHANNEL.registerMessage(index++, BarShieldS2C.class,
@@ -151,39 +157,6 @@ public final class ColossusPackets {
 
     public static MusicToggleS2C musicToggle(String musicId, boolean on) {
         return new MusicToggleS2C(musicId, on);
-    }
-
-    // ---------------- 危险区预告（TelegraphZone 数据形态） ----------------
-
-    public record ZoneSyncS2C(double cx, double cy, double cz,
-                              double radiusXZ, double radiusY,
-                              int colorRGB, String visual, int durationTicks) {
-        static void encode(ZoneSyncS2C msg, FriendlyByteBuf buf) {
-            buf.writeDouble(msg.cx); buf.writeDouble(msg.cy); buf.writeDouble(msg.cz);
-            buf.writeDouble(msg.radiusXZ); buf.writeDouble(msg.radiusY);
-            buf.writeVarInt(msg.colorRGB);
-            buf.writeUtf(msg.visual);
-            buf.writeVarInt(msg.durationTicks);
-        }
-        static ZoneSyncS2C decode(FriendlyByteBuf buf) {
-            return new ZoneSyncS2C(buf.readDouble(), buf.readDouble(), buf.readDouble(),
-                    buf.readDouble(), buf.readDouble(),
-                    buf.readVarInt(), buf.readUtf(), buf.readVarInt());
-        }
-        static void handle(ZoneSyncS2C msg, Supplier<NetworkEvent.Context> ctx) {
-            ctx.get().enqueueWork(() -> com.klze.colossus.client.TelegraphClient.add(
-                    msg.cx(), msg.cy(), msg.cz(), msg.radiusXZ(), msg.radiusY(),
-                    msg.colorRGB(), msg.visual(), msg.durationTicks()));
-            ctx.get().setPacketHandled(true);
-        }
-    }
-
-    /** 把危险区广播给所有追踪 boss 实体的客户端（画到 warn 结束自动淡出）。 */
-    public static void broadcastZone(com.klze.colossus.entity.ColossusBossEntity boss,
-                                     com.klze.colossus.env.TelegraphZone zone) {
-        sendToTrackers(new ZoneSyncS2C(zone.cx(), zone.cy(), zone.cz(),
-                zone.radiusXZ(), zone.radiusY(), zone.colorRGB(), zone.visual(),
-                zone.warnTicks() + 10), boss);
     }
 
     // ---------------- 通用演出 cue（单包承载所有效果类型，ES VfxPacket 形） ----------------

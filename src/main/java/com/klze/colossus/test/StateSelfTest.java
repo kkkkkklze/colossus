@@ -319,10 +319,21 @@ public final class StateSelfTest {
                 h4.usedRecently(roar, 3) && !h4.usedRecently(roar, 2) && h4.usedRecently(sweep, 1));
 
         // 槽宽/值域/格数的关系（轮 11：原先写的是 static 断言，被编译期常量折叠掉了＝没有保险）
-        check("ring layout is self-consistent (slot value fits 8 bits; 8 slots fill a long)",
-                com.klze.colossus.move.MoveHistory.layoutSane()
-                        && com.klze.colossus.move.MoveHistory.valueOf(roar) >= 1
-                        && com.klze.colossus.move.MoveHistory.valueOf(roar) <= 255);
+        check("ring layout is self-consistent (8 slots × slot width == a long)",
+                com.klze.colossus.move.MoveHistory.layoutSane());
+        // 轮 13 P3-1：上一版这里写的是 `valueOf(roar) >= 1 && <= 255`——值域按构造就是 1..128，
+        // `>= 1` 恒真，而把 VALUE_MASK 抬到 0xFF 之后 roar 仍然是 47，也照样绿 ⇒ 装饰不是判据。
+        // 现在钉的是"一批 id 全部落在 1..128"：掩码一旦放宽，这批里必然冒出 >128 的值把它变红，
+        // 而 0 是空槽哨兵（值里出现 0 就等于那招"一出生刚用过"）。
+        boolean valuesInValueRange = true;
+        for (String probe : List.of("roar", "sweep", "smash", "big", "aon", "meteor", "icering",
+                "flamewall", "quake", "lunge", "tail_swipe", "recovery")) {
+            long v = com.klze.colossus.move.MoveHistory.valueOf(
+                    new net.minecraft.resources.ResourceLocation("colossus", probe));
+            valuesInValueRange &= v >= 1 && v <= 128;
+        }
+        check("12 probe ids all land in 1..128 (0 stays reserved as the empty-slot sentinel)",
+                valuesInValueRange);
         var h5 = new com.klze.colossus.move.MoveHistory();
         h5.record(roar);
         var restored = new com.klze.colossus.move.MoveHistory();
@@ -346,6 +357,35 @@ public final class StateSelfTest {
         }
         check("DSL rejects out-of-range notRecent at registration (no silent clamp)",
                 win0Rejected && win9Rejected);
+
+        // === 轮 13 P2-2：阶段带/时长这两格原先只有 JSON 侧拒，DSL 侧静默接受 ===
+        // 恒假的 [3,1) 在 available() 里返回 false，而"不可用"是选招的常态 ⇒ 一点日志都没有，
+        // 那招就凭空消失了。写反的作者只会以为"这招没刷出来"。
+        boolean reversedPhaseRejected = false;
+        boolean zeroDurationRejected = false;
+        try {
+            new com.klze.colossus.move.MoveSetBuilder(null, bid).move("p").duration(10).phase(3, 1);
+        } catch (IllegalArgumentException expected) {
+            reversedPhaseRejected = true;
+        }
+        try {
+            new com.klze.colossus.move.MoveSetBuilder(null, bid).move("d").duration(0);
+        } catch (IllegalArgumentException expected) {
+            zeroDurationRejected = true;
+        }
+        check("DSL setters reject reversed phase band and zero duration at the author's line",
+                reversedPhaseRejected && zeroDurationRejected);
+        // 值域的正主是构造器：绕过 setter 直接造 MoveDef 也不许留下恒假门
+        boolean ctorRejectsBypass = false;
+        try {
+            com.klze.colossus.move.MoveDef.of(new net.minecraft.resources.ResourceLocation("colossus", "bypass"),
+                    10, 20, 3, 1, -1.0f, "bypass",
+                    ctx -> 1, ctx -> true, 0, 0, java.util.List.of());
+        } catch (IllegalArgumentException expected) {
+            ctorRejectsBypass = true;
+        }
+        check("MoveDef's own constructor is the last gate (a bypassed builder still can't ship a dead band)",
+                ctorRejectsBypass);
         var gated = new com.klze.colossus.move.MoveSetBuilder(null, bid)
                 .move("w3").duration(10).notRecent(3).at(1, null).done().builtDefs().get(0);
         check("notRecent is data the engine can see (MoveDef.notRecent), not an opaque predicate",
@@ -436,10 +476,21 @@ public final class StateSelfTest {
         var zone = new com.klze.colossus.env.TelegraphZone(10.5, 3.0, -4.25,
                 6.5, 1.0, 30, 0xFF4040, "ring");
         var back = com.klze.colossus.env.TelegraphZone.fromTag(zone.toTag());
-        check("zone tag round-trips geometry and visual",
+        check("zone tag round-trips geometry, warn and visual",
                 Math.abs(back.cx() - 10.5) < 1e-9 && Math.abs(back.cy() - 3.0) < 1e-9
                         && Math.abs(back.cz() + 4.25) < 1e-9 && Math.abs(back.radiusXZ() - 6.5) < 1e-9
-                        && Math.abs(back.radiusY() - 1.0) < 1e-9 && "ring".equals(back.visual()));
+                        && Math.abs(back.radiusY() - 1.0) < 1e-9 && "ring".equals(back.visual())
+                        // 第二十四批补：旧 fromTag 把 warn 写死成 0，重载路径的轮廓寿命少一整段 warn
+                        && back.warnTicks() == 30);
+        // 等号而非 >=：>= 时把 FADE 改成 0、或把 lifetime 写成 warnTicks 都不会红（弱断言）
+        check("lifetime is exactly warn + fade once (one number, two consumers)",
+                zone.lifetimeTicks() == 30 + com.klze.colossus.env.TelegraphZone.FADE_TICKS
+                        && back.lifetimeTicks() == zone.lifetimeTicks());
+        check("a zero/negative warn still yields a drawable lifetime (no zero-length outline)",
+                new com.klze.colossus.env.TelegraphZone(0, 0, 0, 1, 1, 0, 0, "dust").lifetimeTicks()
+                        == 1 + com.klze.colossus.env.TelegraphZone.FADE_TICKS
+                        && new com.klze.colossus.env.TelegraphZone(0, 0, 0, 1, 1, -5, 0, "dust")
+                                .lifetimeTicks() == 1 + com.klze.colossus.env.TelegraphZone.FADE_TICKS);
 
         var burst = new com.klze.colossus.env.ZoneBurst(6.0f, 0.5f, 40)
                 .merge(new com.klze.colossus.env.ZoneBurst(0.0f, 0.0f, 0));
@@ -475,6 +526,19 @@ public final class StateSelfTest {
         m.invalidate();
         check("invalidate forces exactly one snapshot (join / become-visible)",
                 m.changedAndRemember(0.9f) && !m.changedAndRemember(0.9f));
+
+        // 第二十四批（ColossusBossEvent 补包路径的修法）：旧代码是 invalidate() 之后立刻读
+        // lastSent() 当包体——那是"从未发过"的哨兵 NaN，而客户端 ShieldBars.set 把非有限值
+        // 视作"这条 bar 没有盾"直接删项 ⇒ 注释承诺的"晚入场也拿到当前真值"实际拿到空值。
+        m.invalidate();
+        check("right after invalidate the memo IS the unset sentinel (so it must never be the packet payload)",
+                Float.isNaN(m.lastSent()));
+        m.remember(0.75f);
+        check("remember() books the value actually pushed ⇒ the same value next tick costs 0 packets",
+                !m.changedAndRemember(0.75f));
+        m.remember(Float.NaN);
+        check("remember() refuses non-finite values instead of muting the memo",
+                !m.changedAndRemember(0.75f) && m.changedAndRemember(0.4f));
     }
 
     private static void testFrameRepeatingFiresEveryPeriod() {

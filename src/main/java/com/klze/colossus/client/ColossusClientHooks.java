@@ -39,7 +39,11 @@ public final class ColossusClientHooks {
         }
     }
 
-    /** 危险区几何档分发（v6：AFTER_TRANSLUCENT_BLOCKS + endBatch 收尾；逐区剔除在分发内做）。 */
+    /**
+     * 危险区几何档分发（v6：AFTER_TRANSLUCENT_BLOCKS + endBatch 收尾；逐区剔除在分发内做）。
+     * 进度用<b>绝对 gameTime</b>算（第二十四批）：这里传进去的时刻与轮廓快照同一时基，
+     * 中途进场的人第一眼看到的进度就与服务端一致。
+     */
     @SubscribeEvent
     public static void onRenderLevelStage(net.minecraftforge.client.event.RenderLevelStageEvent event) {
         if (event.getStage() != net.minecraftforge.client.event.RenderLevelStageEvent.Stage.AFTER_TRANSLUCENT_BLOCKS) {
@@ -50,7 +54,28 @@ public final class ColossusClientHooks {
         net.minecraft.world.phys.Vec3 camPos = event.getCamera().getPosition();
         // endBatch 收尾在 TelegraphClient.renderZones 的 finally 里（按样式声明的 RenderType）
         TelegraphClient.renderZones(event.getPoseStack(), mc.renderBuffers().bufferSource(),
-                camPos, event.getFrustum());
+                camPos, event.getFrustum(), mc.level.getGameTime());
+    }
+
+    /**
+     * 轮廓的<b>数据源</b>是 Boss 的同步数据，不是包：所以要一份"当前客户端世界里有哪些 Boss"的名单
+     * 供 {@link TelegraphClient#tick()} 每 tick 去读。用 vanilla 的进/出场事件维持，
+     * 且只在本类（{@code Dist.CLIENT}）里引用客户端渲染层——common 代码不碰 client 包。
+     */
+    @SubscribeEvent
+    public static void onEntityJoin(net.minecraftforge.event.entity.EntityJoinLevelEvent event) {
+        if (event.getLevel().isClientSide()
+                && event.getEntity() instanceof com.klze.colossus.entity.ColossusBossEntity boss) {
+            TelegraphClient.watch(boss);
+        }
+    }
+
+    @SubscribeEvent
+    public static void onEntityLeave(net.minecraftforge.event.entity.EntityLeaveLevelEvent event) {
+        if (event.getLevel().isClientSide()
+                && event.getEntity() instanceof com.klze.colossus.entity.ColossusBossEntity boss) {
+            TelegraphClient.unwatch(boss);
+        }
     }
 
     @SubscribeEvent

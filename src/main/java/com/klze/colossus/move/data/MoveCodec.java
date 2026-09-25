@@ -5,6 +5,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.klze.colossus.Colossus;
 import com.klze.colossus.entity.ColossusBossEntity;
+import com.klze.colossus.data.JsonCodecs;
 import com.klze.colossus.env.TelegraphZone;
 import com.klze.colossus.env.ZoneEffect;
 import com.klze.colossus.move.AttackContext;
@@ -70,8 +71,12 @@ public final class MoveCodec {
     // ==================== 触发器词汇表 ====================
 
     private interface TriggerDecoder {
-        /** depth＝当前触发器嵌套层数（只有 once 会 +1，其余忽略）。 */
-        MoveTrigger decode(JsonObject el, int depth) throws MoveDataException;
+        /**
+         * depth＝当前触发器嵌套层数（只有 once 会 +1，其余忽略）。
+         * field＝调用方攒出来的<b>全路径</b>（{@code frames[2].trigger}），拒因必须能指到第几条；
+         * 轮 13 P2-1：原先各解码器自己写死短名，一条招配 16 个 weight 项时作者只能靠二分找行。
+         */
+        MoveTrigger decode(JsonObject el, int depth, String field) throws MoveDataException;
     }
 
     private static final Map<ResourceLocation, TriggerDecoder> TRIGGER_TYPES = new HashMap<>();
@@ -81,62 +86,63 @@ public final class MoveCodec {
     private static final Map<String, WeightDecoder> WEIGHT_KEYS = new HashMap<>();
 
     private interface ZoneDecoder {
-        java.util.function.Function<ColossusBossEntity, TelegraphZone> decode(JsonObject el) throws MoveDataException;
+        java.util.function.Function<ColossusBossEntity, TelegraphZone> decode(JsonObject el, String field)
+                throws MoveDataException;
     }
 
     private interface EffectDecoder {
         /** 解成一条 {@link com.klze.colossus.env.ZoneBurst} 增量（与 Java DSL 的 telegraph 同一数据形状 ⇒ 可入 NBT）。 */
-        com.klze.colossus.env.ZoneBurst decode(JsonObject el) throws MoveDataException;
+        com.klze.colossus.env.ZoneBurst decode(JsonObject el, String field) throws MoveDataException;
     }
 
     private interface ConditionDecoder {
-        Predicate<AttackContext> decode(JsonElement value) throws MoveDataException;
+        Predicate<AttackContext> decode(JsonElement value, String field) throws MoveDataException;
     }
 
     private interface WeightDecoder {
-        ToIntFunction<AttackContext> decode(JsonObject el) throws MoveDataException;
+        ToIntFunction<AttackContext> decode(JsonObject el, String field) throws MoveDataException;
     }
 
     static {
-        registerTrigger("sound", (JsonObject el, int depth) -> {
-            Sound d = orThrow(decode(el, Sound.CODEC), "sound");
+        registerTrigger("sound", (el, depth, field) -> {
+            Sound d = decodeRecord(el, Sound.CODEC, field);
             return MoveTriggers.sound(d.sound(), d.volume(), d.pitch());
         });
-        registerTrigger("event", (JsonObject el, int depth) -> MoveTriggers.event(requireString(el, "id")));
-        registerTrigger("arc_hit", (JsonObject el, int depth) -> {
-            ArcHit d = orThrow(decode(el, ArcHit.CODEC), "arc_hit");
+        registerTrigger("event", (el, depth, field) -> MoveTriggers.event(requireString(el, "id", field + ".id")));
+        registerTrigger("arc_hit", (el, depth, field) -> {
+            ArcHit d = decodeRecord(el, ArcHit.CODEC, field);
             if (d.contactTag() == null || d.contactTag().isEmpty()) {
                 return MoveTriggers.arcHit(d.radius(), d.arc(), d.damage(), d.knockback());
             }
             return MoveTriggers.arcHitContacted(d.contactTag(), d.radius(), d.arc(), d.damage(), d.knockback());
         });
-        registerTrigger("circle_hit", (JsonObject el, int depth) -> {
-            CircleHit d = orThrow(decode(el, CircleHit.CODEC), "circle_hit");
+        registerTrigger("circle_hit", (el, depth, field) -> {
+            CircleHit d = decodeRecord(el, CircleHit.CODEC, field);
             return MoveTriggers.circleHit(d.radius(), d.damage(), d.knockback());
         });
-        registerTrigger("sweep_hit", (JsonObject el, int depth) -> {
-            SweepHit d = orThrow(decode(el, SweepHit.CODEC), "sweep_hit");
+        registerTrigger("sweep_hit", (el, depth, field) -> {
+            SweepHit d = decodeRecord(el, SweepHit.CODEC, field);
             return MoveTriggers.sweepHit(d.length(), d.damage(), d.knockback());
         });
-        registerTrigger("break_ahead", (JsonObject el, int depth) -> {
-            BreakAhead d = orThrow(decode(el, BreakAhead.CODEC), "break_ahead");
+        registerTrigger("break_ahead", (el, depth, field) -> {
+            BreakAhead d = decodeRecord(el, BreakAhead.CODEC, field, "drop"); // drop 是唯一的布尔成员
             return MoveTriggers.breakAhead(d.forward(), d.width(), d.height(), d.drop());
         });
-        registerTrigger("once", (JsonObject el, int depth) -> {
-            String tag = requireString(el, "tag");
-            MoveTrigger inner = decodeTriggerField(el.get("then"), "then", depth + 1);
+        registerTrigger("once", (el, depth, field) -> {
+            String tag = requireString(el, "tag", field + ".tag");
+            MoveTrigger inner = decodeTriggerField(el.get("then"), field + ".then", depth + 1);
             return MoveTriggers.once(tag, inner);
         });
-        registerTrigger("telegraph", (JsonObject el, int depth) -> {
-            var zone = decodeZoneField(el.get("zone"), "zone");
-            var burst = decodeEffectField(el.get("effect"), "effect");
+        registerTrigger("telegraph", (el, depth, field) -> {
+            var zone = decodeZoneField(el.get("zone"), field + ".zone");
+            var burst = decodeEffectField(el.get("effect"), field + ".effect");
             return MoveTriggers.telegraph(zone, b -> burst);
-
         });
-        registerTrigger("telegraph_visual", (JsonObject el, int depth) -> MoveTriggers.telegraphVisual(decodeZoneField(el.get("zone"), "zone")));
+        registerTrigger("telegraph_visual", (el, depth, field) ->
+                MoveTriggers.telegraphVisual(decodeZoneField(el.get("zone"), field + ".zone")));
 
-        ZONE_KINDS.put("circle_ahead", el -> {
-            CircleAhead d = orThrow(decode(el, CircleAhead.CODEC), "zone.circle_ahead");
+        ZONE_KINDS.put("circle_ahead", (el, field) -> {
+            CircleAhead d = decodeRecord(el, CircleAhead.CODEC, field);
             return boss -> {
                 TelegraphZone z = TelegraphZone.damageCircle(boss, d.forward(), d.side(),
                         d.radius(), d.warn(), d.color());
@@ -144,45 +150,54 @@ public final class MoveCodec {
             };
         });
 
-        EFFECT_KINDS.put("damage", el -> {
-            DamageEffect d = orThrow(decode(el, DamageEffect.CODEC), "effect.damage");
+        EFFECT_KINDS.put("damage", (el, field) -> {
+            DamageEffect d = decodeRecord(el, DamageEffect.CODEC, field);
             return new com.klze.colossus.env.ZoneBurst(d.damage(), d.knockback(), 0);
         });
-        EFFECT_KINDS.put("freeze", el -> {
-            FreezeEffect d = orThrow(decode(el, FreezeEffect.CODEC), "effect.freeze");
+        EFFECT_KINDS.put("freeze", (el, field) -> {
+            FreezeEffect d = decodeRecord(el, FreezeEffect.CODEC, field);
             return new com.klze.colossus.env.ZoneBurst(0.0f, 0.0f, d.ticks());
         });
 
-        CONDITION_KEYS.put("phase_in", value -> {
-            int[] band = intPair(value, "requires.phase_in");
+        CONDITION_KEYS.put("phase_in", (value, field) -> {
+            int[] band = intPair(value, field);
             return ctx -> ctx.phase() >= band[0] && ctx.phase() < band[1];
         });
-        CONDITION_KEYS.put("target_within", value -> {
-            double dist = requireFloat(value, "requires.target_within");
+        CONDITION_KEYS.put("target_within", (value, field) -> {
+            double dist = requireFloat(value, field);
             return ctx -> ctx.distSq() <= dist * dist;
         });
-        CONDITION_KEYS.put("target_beyond", value -> {
-            double dist = requireFloat(value, "requires.target_beyond");
+        CONDITION_KEYS.put("target_beyond", (value, field) -> {
+            double dist = requireFloat(value, field);
             return ctx -> ctx.distSq() > dist * dist;
         });
         // `not_recent` 在这里**不注册**：它是保留键，解成 MoveDef.notRecent 这个数据字段而不是折进
         // lambda。引擎必须认得出"这条是被历史挡的"，才能在整表被挡空时只放开这一道做保底
         // （审查轮 10 F1：环形窗口只由出招推进，等待不消解封锁）。
 
-        WEIGHT_KEYS.put("base", el -> {
-            int base = requireInt(el.get("base"), "weight.base"); // 成员值而非整行；非整数拒（轮 11 #5）
+        WEIGHT_KEYS.put("base", (el, field) -> {
+            int base = requireInt(el.get("base"), field + ".base"); // 成员值而非整行；非整数拒（轮 11 #5）
             return ctx -> base;
         });
-        WEIGHT_KEYS.put("distance_band", el -> {
-            Band d = orThrow(decode(el, Band.CODEC), "weight.distance_band");
+        WEIGHT_KEYS.put("distance_band", (el, field) -> {
+            Band d = decodeRecord(el, Band.CODEC, field);
+            // 轮 13 P2-3：min/max 原先无形态校验——写反的带永不匹配，作者以为的"贴脸加 10 权重"
+            // 从来没生效，且回执一个字节都不打（intPair 那条家族早就拒 max<min 了，这是同一家族的第二格）
+            if (d.max() < d.min()) {
+                throw new MoveDataException(field + ".min/max",
+                        "max < min：[" + d.min() + "," + d.max() + "] 这条带永远匹配不到距离");
+            }
+            if (d.min() < 0.0) {
+                throw new MoveDataException(field + ".min", "距离下界不能是负数：" + d.min());
+            }
             return ctx -> {
                 double dist = Math.sqrt(ctx.distSq());
                 return dist >= d.min() && dist <= d.max() ? d.add() : 0;
             };
         });
-        WEIGHT_KEYS.put("recent_band", el -> {
-            int window = recentWindow(el.get("window"), "weight.recent_band.window");
-            int add = requireInt(el.get("add"), "weight.recent_band.add"); // 通常是负数＝降权
+        WEIGHT_KEYS.put("recent_band", (el, field) -> {
+            int window = recentWindow(el.get("window"), field + ".window");
+            int add = requireInt(el.get("add"), field + ".add"); // 通常是负数＝降权
             return ctx -> ctx.usedRecently(window) ? add : 0;
         });
     }
@@ -190,15 +205,40 @@ public final class MoveCodec {
     /**
      * 严格整数 Codec：{@code Codec.INT} 在 DFU 6.0.8 里是
      * {@code getNumberValue(...).map(Number::intValue)}——**照样把 10.5 静默截成 10**。
-     * 轮 12 F3：同一个字段的数组形态已经会拒、codec 形态却仍截断，等于一个字段两套规则
-     * （正是 {@code MoveDef} javadoc 自己立的"不留可绕过的第二形态"）。错因由 {@code orThrow}
-     * 拼成字段级回执，所以作者看到的是 {@code <字段>: codec rejected input: ...}。
+     * 轮 12 F3：同一个字段的数组形态已经会拒、codec 形态却仍截断，等于一个字段两套规则。
+     *
+     * <p>轮 13 P1-1 把剩下的两格也补齐（审查者把这段与 {@code requireInt} 逐字抄成独立程序，
+     * 用工程实际依赖的 DFU 6.0.8 + gson 2.10 跑过对照表）：
+     * ①非有限值与超 int 域原先会**饱和成 ±2^31-1 且不报错**（{@code (int)(double)1e10}＝2147483647，
+     * JLS 5.1.3 的窄化规则），一条 {@code "add": 10000000000} 就能把某招变成每 tick 必选、其余饿死；
+     * ②JSON 布尔 DFU 会折成 1/0（{@code JsonOps#getNumberValue}：
+     * {@code isBoolean() → DataResult.success(getAsBoolean() ? 1 : 0)}），Codec 这一层**根本看不见**"作者写了个
+     * true"——那一格只能开在 gson 侧，见 {@link #decodeRecord}。
      */
-    private static final Codec<Integer> STRICT_INT = Codec.DOUBLE.flatXmap(
-            d -> d == Math.rint(d) ? com.mojang.serialization.DataResult.success((int) (double) d)
-                    : com.mojang.serialization.DataResult.error(
-                            () -> "expected an integer, got " + d),
-            i -> com.mojang.serialization.DataResult.success(i.doubleValue()));
+    private static final Codec<Integer> STRICT_INT = JsonCodecs.STRICT_INT;
+
+    /**
+     * 解一条记录型数据（{@code X.CODEC}）的唯一入口：先过"布尔不能当数字"这道 gson 侧的闸，
+     * 再把 Codec 的失败拼成字段级回执。
+     *
+     * <p>{@code booleanKeys} 声明该记录里**合法**的布尔成员（目前只有 {@code break_ahead.drop}）；
+     * 其余成员只要是布尔就拒。为什么不干脆不用 Codec：{@code Band}/{@code CircleAhead} 这些
+     * 是要写进文档给内容作者抄的形状，换成手写帮手会把"词汇表即 schema"这条属性丢掉；
+     * 布尔那一格补在门外，是两害相权。
+     */
+    private static <D> D decodeRecord(JsonObject el, Codec<D> codec, String field, String... booleanKeys)
+            throws MoveDataException {
+        java.util.Set<String> allowedBooleans = new java.util.HashSet<>(java.util.Arrays.asList(booleanKeys));
+        for (Map.Entry<String, com.google.gson.JsonElement> member : el.entrySet()) {
+            JsonElement v = member.getValue();
+            boolean isBoolean = v.isJsonPrimitive() && v.getAsJsonPrimitive().isBoolean();
+            if (isBoolean && !allowedBooleans.contains(member.getKey())) {
+                throw new MoveDataException(field + "." + member.getKey(),
+                        "这里要的是数字/字符串，给了布尔 " + v + "（DFU 会把它静默折成 1/0）");
+            }
+        }
+        return orThrow(decode(el, codec), field);
+    }
 
     /** 整数值读取：非整数/非数字一律字段级拒（原先 {@code (int) requireFloat} 会把 8.9 静默截成 8）。 */
     private static int requireInt(JsonElement el, String field) throws MoveDataException {
@@ -322,8 +362,8 @@ public final class MoveCodec {
                             requireInt(three.get(2), "frames[" + i + "].repeating[2]"),
                             (boss, tick) -> trigger.execute(boss, tick)));
                 } else {
-                    RepeatingWindow d = orThrow(decode(row.get("repeating"), RepeatingWindow.CODEC),
-                            "frames[" + i + "].repeating");
+                    RepeatingWindow d = decodeRecord(row.getAsJsonObject("repeating"),
+                            RepeatingWindow.CODEC, "frames[" + i + "].repeating");
                     out.add(com.klze.colossus.state.FrameRunner.Frame.repeating(
                             d.from(), d.to(), d.period(),
                             (boss, tick) -> trigger.execute(boss, tick)));
@@ -357,7 +397,8 @@ public final class MoveCodec {
             // 于是"降权仍可选"其实是禁选——与 notRecent 撞成同一件事，还更隐蔽。
             // 规则：普通项之和若非正，那是作者真的要禁用（保留）；历史项只能在正数基础上往下压，
             // 且地板是 1（可选但几乎不会被选中）。
-            (HISTORY_WEIGHT_KEYS.contains(kind) ? historyParts : parts).add(d.decode(row));
+            (HISTORY_WEIGHT_KEYS.contains(kind) ? historyParts : parts)
+                    .add(d.decode(row, "weight[" + i + "]." + kind));
         }
         return ctx -> {
             int sum = 0;
@@ -399,7 +440,7 @@ public final class MoveCodec {
                 throw new MoveDataException("requires[" + i + "]", "unknown condition '" + key
                         + "' (known: " + String.join(", ", known.stream().sorted().toList()) + ")");
             }
-            check = check.and(d.decode(value));
+            check = check.and(d.decode(value, "requires[" + i + "]." + key));
         }
         return new Conditions(check, notRecent);
     }
@@ -427,16 +468,16 @@ public final class MoveCodec {
             throw new MoveDataException(field + ".type", "unknown trigger '" + typeId + "' (known: "
                     + TRIGGER_TYPES.keySet().stream().map(ResourceLocation::getPath).sorted().toList() + ")");
         }
-        return d.decode(obj, depth);
+        return d.decode(obj, depth, field);
     }
 
     private static java.util.function.Function<ColossusBossEntity, TelegraphZone> decodeZoneField(
             JsonElement el, String field) throws MoveDataException {
         if (!(el instanceof JsonObject obj)) throw new MoveDataException(field, "expected an object");
-        String kind = requireString(obj, "kind");
+        String kind = requireString(obj, "kind", field + ".kind");
         ZoneDecoder d = ZONE_KINDS.get(kind);
         if (d == null) throw new MoveDataException(field + ".kind", "unknown zone kind '" + kind + "'");
-        return d.decode(obj);
+        return d.decode(obj, field);
     }
 
     private static com.klze.colossus.env.ZoneBurst decodeEffectField(
@@ -452,10 +493,10 @@ public final class MoveCodec {
             return acc;
         }
         if (!(el instanceof JsonObject obj)) throw new MoveDataException(field, "expected object or array");
-        String kind = requireString(obj, "kind");
+        String kind = requireString(obj, "kind", field + ".kind");
         EffectDecoder d = EFFECT_KINDS.get(kind);
         if (d == null) throw new MoveDataException(field + ".kind", "unknown effect kind '" + kind + "'");
-        return d.decode(obj);
+        return d.decode(obj, field);
     }
 
     // ==================== 小工具 ====================
@@ -473,10 +514,19 @@ public final class MoveCodec {
     }
 
     private static String requireString(JsonObject el, String field) throws MoveDataException {
-        if (!el.has(field) || !el.get(field).isJsonPrimitive()) {
+        return requireString(el, field, field);
+    }
+
+    /**
+     * 成员名与回执路径<b>分开给</b>。轮 13 P2-1 把全路径串进 field 之后必须拆这一刀：
+     * 拿 {@code "frames[0].trigger.id"} 去 {@code el.get(...)} 永远查不到，
+     * 合法记录会被判成"缺字段"——本仓的第一次红就是这么来的（改动当天 `event` 触发器全军覆没）。
+     */
+    private static String requireString(JsonObject el, String key, String field) throws MoveDataException {
+        if (!el.has(key) || !el.get(key).isJsonPrimitive()) {
             throw new MoveDataException(field, "missing or not a string");
         }
-        return el.get(field).getAsString();
+        return el.get(key).getAsString();
     }
 
     private static String requireString(JsonElement el, String field) throws MoveDataException {

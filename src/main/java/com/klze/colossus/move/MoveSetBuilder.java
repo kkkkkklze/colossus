@@ -84,12 +84,34 @@ public final class MoveSetBuilder {
             this.animName = id.getPath();
         }
 
-        /** 总时长（逻辑 tick）。 */
-        public MoveBuilder duration(int ticks) { this.duration = Math.max(1, ticks); return this; }
+        /**
+         * 总时长（逻辑 tick）。<b>0 与负数直接拒</b>（轮 13 P2-2）：旧写法静默 {@code Math.max(1, ticks)}，
+         * 作者写错一个 0 得到的是一招"只有一帧"的招，而不是报错——JSON 侧同字段一直是拒的。
+         * 值域的正主仍是 {@link MoveDef} 构造器（两条入口共用），这里只是把报错点搬到作者那一行。
+         */
+        public MoveBuilder duration(int ticks) {
+            if (ticks < 1) {
+                throw new IllegalArgumentException("move " + id + ": duration must be >= 1 tick, got " + ticks
+                        + " (a zero-length move is never what you meant to write)");
+            }
+            this.duration = ticks;
+            return this;
+        }
         /** 释放后的全局冷却。 */
         public MoveBuilder cooldown(int ticks) { this.cooldown = Math.max(0, ticks); return this; }
-        /** 阶段门 [min,max)。 */
-        public MoveBuilder phase(int min, int max) { this.minPhase = min; this.maxPhase = max; return this; }
+        /**
+         * 阶段门 {@code [min,max)}。{@code max <= min}（含 {@code phase(3,1)} 这种写反的）当场拒：
+         * 那是一条恒假门，招式永远不可选且<b>一点日志都没有</b>——选招路径把"不可用"当常态。
+         */
+        public MoveBuilder phase(int min, int max) {
+            if (max <= min) {
+                throw new IllegalArgumentException("move " + id + ": phase band must satisfy max > min, got ["
+                        + min + "," + max + ") — that is a permanently-unsatisfiable gate");
+            }
+            this.minPhase = min;
+            this.maxPhase = max;
+            return this;
+        }
         /** 目标距离门（≤range 格才可选）。 */
         public MoveBuilder range(float blocks) { this.range = blocks; return this; }
         /** 客户端动画名，默认取招式 path。 */
@@ -103,11 +125,22 @@ public final class MoveSetBuilder {
             this.animName = name;
             return this;
         }
-        /** 上下文权重函数（距离/阶段自适应选招）。 */
+        /**
+         * 上下文权重函数（距离/阶段自适应选招）。
+         *
+         * <p><b>必须是 {@code ctx} 的纯函数</b>——{@link MoveSet#pick} 在保底那一遍会对<b>同一张表</b>
+         * 再求值一次，带状态的实现（读随机数、读外部可变字段）会让两遍结论毫无关系，
+         * 那句"被历史门挡空"的日志与"重试池必非空"的前提就都不成立了（轮 13 P3-5）。
+         */
         public MoveBuilder weight(ToIntFunction<AttackContext> fn) { this.weightFn = fn; return this; }
         /** 固定权重。 */
         public MoveBuilder weight(int constant) { this.weightFn = ctx -> constant; return this; }
-        /** 附加准入谓词。 */
+        /**
+         * 附加准入谓词（同样<b>必须是对 {@code ctx} 的纯函数</b>，理由见 {@link #weight(ToIntFunction)}）。
+         *
+         * <p>注意它是引擎<b>看不见</b>的门：整表都挂这种谓词时，{@link MoveSet#pick} 的保底放不开
+         * （保底只放开历史门）。要"最近用过就别选我"请走 {@link #notRecent(int)}，那是数据字段。
+         */
         public MoveBuilder requires(Predicate<AttackContext> check) { this.extraCheck = this.extraCheck.and(check); return this; }
 
         /**
@@ -116,10 +149,12 @@ public final class MoveSetBuilder {
          * <p>与 {@code requires(ctx -> !ctx.usedRecently(n))} 的区别是这条<b>引擎看得见</b>：
          * {@link MoveSet#pick} 在整表被历史挡空时会忽略历史门再选一次。环形窗口只由出招推进、
          * 等待不消解，看不见它的引擎会让 Boss 出现不随时间愈合的空窗甚至永久死锁（审查轮 10 F1）。
-         * <p>跨招互斥（"刚放过 A 才准放 B"）必须用 {@code requires(ctx -> ctx.boss().usedRecently(A, n))}
-     * 这种**指名别的招**的写法——{@code ctx.usedRecently(n)} 读的就是候选自己，跟本方法同义，
-     * 拿它再挂一道只会把这一招变成恒假（轮 12 F1：§2.2 的样例就是这么自相矛盾的）。
-     * 另外 {@code requires} 里的历史判断是引擎看不见的门：整表都挂它就没有保底可放开。
+         *
+         * <p>跨招互斥（"刚放过 A 才准放 B"）必须用 {@code requires(ctx -> !ctx.boss().usedRecently(A, n))}
+         * 这种<em>指名别的招</em>的写法。本方法的 {@code ctx.usedRecently(n)} 读的就是<b>候选自己</b>，
+         * 与它同义，所以再叠一道只会把这一招锁得更死：{@code n <= window} 时是恒假门，
+         * {@code n > window} 时是"比本方法更严的门"（轮 12 F1：§2.2 的样例就自相矛盾过——
+         * 上一版这里写成"恒假"是说过头了，两种情形都算清楚才是实话）。
          */
         public MoveBuilder notRecent(int window) {
             if (window < 1 || window > MoveHistory.SLOTS) {

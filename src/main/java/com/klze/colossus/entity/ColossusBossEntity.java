@@ -3,6 +3,7 @@ package com.klze.colossus.entity;
 import com.klze.colossus.Colossus;
 import com.klze.colossus.ColossusConfig;
 import com.klze.colossus.bar.ColossusBossEvent;
+import com.klze.colossus.env.TelegraphZone;
 import com.klze.colossus.fight.ContactBook;
 import com.klze.colossus.fight.EngagementTracker;
 import com.klze.colossus.fight.ScalingStrategy;
@@ -71,8 +72,10 @@ import java.util.UUID;
  *   <li>血条 renderType 旁路、音乐幂等开关、类型化客户端事件。</li>
  * </ul>
  *
- * <p>同步契约：{@code PHASE / ATTACK_ID / ATTACK_ANIM / ATTACK_DURATION / ATTACK_TICK / ATTACK_SEQ / DEATH_TICK / ACTIVATED}
- * 全走 entityData——战斗状态零自定义包。
+ * <p>同步契约：{@code PHASE / ATTACK_ID / ATTACK_ANIM / ATTACK_DURATION / ATTACK_TICK / ATTACK_SEQ / DEATH_TICK / ACTIVATED
+ * / TELEGRAPHS}
+ * 全走 entityData——战斗状态零自定义包。第二十四批起危险区轮廓也在这份清单里
+ * （它原本是最后一条"发完就不管"的自定义包，见 {@link #DATA_TELEGRAPHS}）。
  */
 public abstract class ColossusBossEntity extends Monster {
 
@@ -176,14 +179,21 @@ public abstract class ColossusBossEntity extends Monster {
         }
     }
 
-    /** N tick 后在服务端 aiStep 里执行一次（实体先消失则不执行）。kind 见 {@link #registerDeferredWork}。 */
-    public void scheduleWork(int delayTicks, String kind, CompoundTag data) {
+    /**
+     * N tick 后在服务端 aiStep 里执行一次（实体先消失则不执行）。kind 见 {@link #registerDeferredWork}。
+     *
+     * <p>返回 false＝队列已满被拒。调用方<b>必须</b>据此决定要不要连带做别的事：
+     * telegraph 帧就是靠这个返回值把"地上的圈"和"会落下的那一发"绑成一次原子操作，
+     * 否则队列满时玩家会看见一块永远不炸的假警告（第二十四批补的门）。
+     */
+    public boolean scheduleWork(int delayTicks, String kind, CompoundTag data) {
         if (this.workQueue.size() >= MAX_PENDING_WORK) {
             Colossus.LOGGER.warn("boss {} deferred-work queue full ({} entries) — refusing new {}",
                     this.getBossId(), this.workQueue.size(), kind);
-            return;
+            return false;
         }
         this.workQueue.add(new DeferredWork(this.level().getGameTime() + Math.max(1, delayTicks), kind, data));
+        return true;
     }
 
     /** 在途待办数（诊断与回归桩用：证明"存进存档再读回来，队列没被清空"）。 */
@@ -212,9 +222,155 @@ public abstract class ColossusBossEntity extends Monster {
         }
     }
 
+    // ==================== 危险区投影（telegraph 的可视态，第二十四批） ====================
+
+    /**
+     * 在途轮廓的<b>同步数据</b>形态：{@code {views:[{几何…, id, start, end}]}}。
+     *
+     * <p>为什么从自定义包改成 entityData（v11 取证 A2 的结论，源码已复核）：
+     * vanilla 在 {@code ServerEntity#sendPairingData}（{@code ServerEntity.java:237-239}）
+     * 会给<b>新追踪者</b>自动补发一份 {@code ClientboundSetEntityDataPacket} 全量快照，
+     * 而且 {@code sendDirtyEntityData:294} 每次发包都刷新 {@code trackedDataValues}——
+     * 于是"中途进场看不见轮廓""重进世界轮廓全没""重载后伤害照落但圈不亮"三条病灶
+     * 一次性消失，且一行补包代码都不用写。旧写法（{@code ZoneSync} 单发包 + 客户端本地倒计时）
+     * 三条全中，其中 {@code TelegraphClient} 那句 {@code mc.level == null → clear()} 是最干净的反例。
+     *
+     * <p>计时用<b>绝对 gameTime</b>（{@code start}/{@code end}）而不是"还剩几 tick"：
+     * 晚到的人据此算出"这块地已经烧掉一半"，而不是从 0 重新亮一遍（v11 A3 的三家对照里唯一语义安全的一档）。
+     */
+    private static final EntityDataAccessor<CompoundTag> DATA_TELEGRAPHS =
+            SynchedEntityData.defineId(ColossusBossEntity.class, EntityDataSerializers.COMPOUND_TAG);
+
+    /** 同时在途的轮廓上限（与 {@link #MAX_PENDING_WORK} 同一动机：不封顶就是高频 telegraph 把同步数据越写越大）。 */
+    public static final int MAX_ACTIVE_TELEGRAPHS = 8;
+
+    /** 一条在途轮廓：几何 + 起止的绝对 gameTime。{@code id} 只用来让客户端认出"还是同一块地"。 */
+    public record TelegraphView(int id, TelegraphZone zone, long startGameTime, long endGameTime) {
+
+        CompoundTag toTag() {
+            CompoundTag tag = this.zone.toTag();
+            tag.putInt("id", this.id);
+            tag.putLong("start", this.startGameTime);
+            tag.putLong("end", this.endGameTime);
+            return tag;
+        }
+
+        static @Nullable TelegraphView fromTag(net.minecraft.nbt.Tag t) {
+            if (!(t instanceof CompoundTag tag)) return null;
+            if (!tag.contains("id", net.minecraft.nbt.Tag.TAG_INT)) return null; // 残缺：丢掉，别在渲染路径炸
+            return new TelegraphView(tag.getInt("id"), TelegraphZone.fromTag(tag),
+                    tag.getLong("start"), tag.getLong("end"));
+        }
+    }
+
+    private final java.util.LinkedHashMap<Integer, TelegraphView> telegraphViews =
+            new java.util.LinkedHashMap<>();
+    private int telegraphSeq = 0;
+    /** 最近的到期时刻（没有在途轮廓时＝{@link Long#MAX_VALUE}）；aiStep 只在跨过它的那一 tick 重投，热路径 O(1)。 */
+    private long nextTelegraphCheck = Long.MAX_VALUE;
+
+    /**
+     * 登记一块危险区并投进同步数据（仅服务端；客户端调用返回"没登记"）。
+     *
+     * <p>{@code ticks} 是<b>轮廓总寿命</b>（不是"距结算还有几 tick"）——
+     * 调用方一般直接给 {@link TelegraphZone#lifetimeTicks()}，让"淡出"与"结算"各管各的。
+     *
+     * @return 这一条轮廓的 id（配 {@link #hideTelegraph(int)} 提前撤），
+     *         投影已满时返回 {@code -1}。调用方<b>要</b>判：伤害帧要是连预警都画不出来，
+     *         就该整发放弃，而不是落一发没见过的圈（第二十四批的取舍，见
+     *         {@link com.klze.colossus.move.MoveTriggers#telegraph}）。
+     */
+    public int showTelegraph(TelegraphZone zone, int ticks) {
+        if (this.level().isClientSide || zone == null) return -1;
+        if (this.deathPending) return -1; // 演出中不该再立新圈：下面那发一定会被 ZoneWork 判弃
+        if (this.telegraphViews.size() >= MAX_ACTIVE_TELEGRAPHS) {
+            Colossus.LOGGER.warn("boss {} telegraph projection full ({} entries) — refusing new zone at ({}, {}, {})",
+                    this.getBossId(), this.telegraphViews.size(),
+                    String.format("%.1f", zone.cx()), String.format("%.1f", zone.cy()),
+                    String.format("%.1f", zone.cz()));
+            return -1;
+        }
+        long now = this.level().getGameTime();
+        int id = ++this.telegraphSeq;
+        this.telegraphViews.put(id, new TelegraphView(id, zone, now, now + Math.max(1, ticks)));
+        this.publishTelegraphs();
+        return id;
+    }
+
+    /** 提前撤掉一条轮廓（id 来自 {@link #showTelegraph}；不存在时静默忽略）。 */
+    public void hideTelegraph(int viewId) {
+        if (this.level().isClientSide || !this.telegraphViews.containsKey(viewId)) return;
+        this.telegraphViews.remove(viewId);
+        this.publishTelegraphs();
+    }
+
+    /**
+     * 重投快照。写进 entityData 的必须是<b>新建</b>的 tag：vanilla 的脏判据是
+     * {@code ObjectUtils.notEqual(newValue, oldValue)}（{@code SynchedEntityData.java:129}），
+     * 原地改同一个实例会永远判成"没变"⇒ 一帧都不发。这条与 {@code getNonDefaultValues}
+     * 一起构成"新追踪者补包"的前提，别图省事改成复用。
+     */
+    private void publishTelegraphs() {
+        long now = this.level().getGameTime();
+        this.telegraphViews.entrySet().removeIf(e -> e.getValue().endGameTime() <= now);
+        this.nextTelegraphCheck = Long.MAX_VALUE;
+        for (TelegraphView v : this.telegraphViews.values()) {
+            if (v.endGameTime() < this.nextTelegraphCheck) this.nextTelegraphCheck = v.endGameTime();
+        }
+        CompoundTag snapshot = new CompoundTag();
+        if (!this.telegraphViews.isEmpty()) {
+            net.minecraft.nbt.ListTag list = new net.minecraft.nbt.ListTag();
+            for (TelegraphView v : this.telegraphViews.values()) list.add(v.toTag());
+            snapshot.put("views", list);
+        }
+        this.entityData.set(DATA_TELEGRAPHS, snapshot); // 值相等时 set 本身就不发包（清空后不再重发）
+    }
+
+    /** 到点清理：aiStep 每 tick 只比一个 long，跨过最早到期时刻才真正重投。 */
+    private void tickTelegraphs() {
+        if (this.level().getGameTime() >= this.nextTelegraphCheck) this.publishTelegraphs();
+    }
+
+    /**
+     * 轮廓快照的<b>原始 tag</b>（客户端只用来判"这份数据换过没有"——vanilla 每次补包都换实例，
+     * 所以引用比较是 O(1) 且正好够用）。
+     *
+     * <p><b>不许改返回值</b>：它就是 entityData 里那个活对象，原地改会让 vanilla 的脏判据
+     * （{@code ObjectUtils.notEqual}）永远看不出变化 ⇒ 一帧都不发。要读内容请用 {@link #telegraphViews()}。
+     */
+    public CompoundTag telegraphSnapshot() {
+        return this.entityData.get(DATA_TELEGRAPHS);
+    }
+
+    /** 在途轮廓解码结果（客户端渲染层与诊断用；空快照零分配）。 */
+    public java.util.List<TelegraphView> telegraphViews() {
+        CompoundTag snapshot = this.entityData.get(DATA_TELEGRAPHS);
+        if (!snapshot.contains("views")) return java.util.List.of();
+        net.minecraft.nbt.ListTag list = snapshot.getList("views", net.minecraft.nbt.Tag.TAG_COMPOUND);
+        java.util.List<TelegraphView> out = new java.util.ArrayList<>(list.size());
+        for (net.minecraft.nbt.Tag t : list) {
+            TelegraphView v = TelegraphView.fromTag(t);
+            if (v != null) out.add(v);
+        }
+        return out;
+    }
+
+    /** 服务端在途条数（回归桩判据：投影响、封顶、到期清理三件事都从这一个口径读）。 */
+    public int activeTelegraphCount() {
+        return this.telegraphViews.size();
+    }
+
+    /** 死亡演出开始：轮廓立刻撤——待办那发已经会被 {@code ZoneWork} 判弃，留着圈就是撒谎。 */
+    void dropAllTelegraphs() {
+        if (this.level().isClientSide) return;
+        if (!this.telegraphViews.isEmpty()) {
+            this.telegraphViews.clear();
+            this.publishTelegraphs();
+        }
+    }
+
     private boolean deathPending = false;
-    private boolean deathResolved = false;
-    private boolean phaseLock = false;
+    private boolean deathResolved = false;    private boolean phaseLock = false;
     private boolean[] gatesFired = null;
     /** 读档恢复：演出中被卸载的 Boss 重载后在首个 aiStep 续上死亡流程（审查 P1）。 */
     private boolean resumeDeathPending = false;
@@ -337,6 +493,7 @@ public abstract class ColossusBossEntity extends Monster {
         }
         this.stateController.tick();
         this.drainWork();
+        this.tickTelegraphs(); // 轮廓到期只比一个 long，跨过最早 end 才重投快照
         tickCooldowns();
 
         if (!(this.level() instanceof ServerLevel server)) return;
@@ -887,6 +1044,8 @@ public abstract class ColossusBossEntity extends Monster {
     /** 演出开场副作用：血条清零并隐藏/停音乐/清延迟队列/成员收摊（渲染层读 DEATH_TICK）。 */
     void onDeathSequenceStart() {
         this.workQueue.clear(); // 死亡后不再结算旧的 telegraph/延迟动作（审查 P2）
+        // 队列一清，地上的圈就变成"永远不会落下来的假警告"——同一处一起撤（第二十四批）
+        this.dropAllTelegraphs();
         // squad 收摊放在<b>演出开场</b>而不是结算处：演出默认 100t 里队长血量钉在 1.0、isAlive() 仍 true，
         // 成员照旧被锚点钉在尸体肩上挨打——广播晚发就是"Boss 已死、触手还在陪葬"。
         // （不是"不提前就会到点补员"：补员在 deathPending 下被 aiStep 与 tickSessionAndSquad 双重门挡死，
@@ -1255,6 +1414,7 @@ public abstract class ColossusBossEntity extends Monster {
         this.entityData.define(DATA_DEATH_TICK, 0);
         this.entityData.define(DATA_ACTIVATED, false);
         this.entityData.define(DATA_PART_BITS, 0L);
+        this.entityData.define(DATA_TELEGRAPHS, new CompoundTag()); // 空标签=没有在途轮廓（非默认值才会进补包快照）
     }
 
     @Override
@@ -1299,6 +1459,14 @@ public abstract class ColossusBossEntity extends Monster {
             works.add(one);
         }
         tag.put("colossus_works", works); // 空列表也写：读侧据此区分"没待办"与"这版本没存过"
+        // 轮廓投影与待办队列各写一份：两者回答的是不同问题（"画到什么时候" vs "落什么伤害"），
+        // 合成一份会让 ZoneWork 的弃单门（死亡/卸载）顺带把视觉也删掉——那正是"圈凭空消失"的老 bug。
+        long telegraphNow = this.level().getGameTime();
+        net.minecraft.nbt.ListTag views = new net.minecraft.nbt.ListTag();
+        for (TelegraphView v : this.telegraphViews.values()) {
+            if (v.endGameTime() > telegraphNow) views.add(v.toTag()); // 已过期的不落盘
+        }
+        tag.put("colossus_telegraphs", views);
         if (this.getMaxHealth() > 0) {
             tag.putFloat("colossus_hp_ratio", this.getHealth() / this.getMaxHealth());
         }
@@ -1400,6 +1568,21 @@ public abstract class ColossusBossEntity extends Monster {
         if (tag.contains("colossus_shield", net.minecraft.nbt.Tag.TAG_FLOAT)
                 && !this.level().isClientSide) {
             this.setShield(tag.getFloat("colossus_shield"));
+        }
+        if (tag.contains("colossus_telegraphs", net.minecraft.nbt.Tag.TAG_LIST)
+                && !this.level().isClientSide) {
+            // 起止存的是绝对 gameTime，跨重载仍然自洽：还剩几 tick 由 level 自己回答，
+            // 不需要像旧写法那样"把剩余量重新当年龄"（那是第十六批之前的对称缺陷）。
+            this.telegraphViews.clear();
+            long now = this.level().getGameTime();
+            for (var t : tag.getList("colossus_telegraphs", net.minecraft.nbt.Tag.TAG_COMPOUND)) {
+                TelegraphView v = TelegraphView.fromTag(t);
+                if (v == null) continue; // 残缺：丢掉（同 ZoneWork 的读侧口径）
+                if (v.endGameTime() <= now) continue; // 卸载期间已经烧完：不补画，也不会有伤害落
+                this.telegraphViews.put(v.id(), v);
+                if (v.id() > this.telegraphSeq) this.telegraphSeq = v.id(); // 序号续上，别把 id 发给还活着的旧轮廓
+            }
+            this.publishTelegraphs(); // 重载后必须重投：entityData 不落盘，补包快照靠它
         }
         if (tag.contains("colossus_part_damage", net.minecraft.nbt.Tag.TAG_COMPOUND)) {
             CompoundTag pd = tag.getCompound("colossus_part_damage");

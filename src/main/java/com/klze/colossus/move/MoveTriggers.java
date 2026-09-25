@@ -75,8 +75,12 @@ public final class MoveTriggers {
     }
 
     /**
-     * 危险区预告帧：广播 telegraph 区（客户端画轮廓），warnTicks 后由实体延迟队列
-     * 对区域内实体执行 effect——BR IceSpike 的"数据形态"，触发时机由帧表声明。
+     * 危险区预告帧：把 telegraph 区登记进 Boss 的同步数据（客户端画轮廓），warnTicks 后由实体
+     * 延迟队列对区域内实体执行 effect——BR IceSpike 的"数据形态"，触发时机由帧表声明。
+     *
+     * <p>轮廓与结算<b>两套生命周期各走各的</b>：结算在 {@code scheduleWork} 的待办队列里
+     * （可跨存档），可视态在 {@code DATA_TELEGRAPHS} 的投影里（可补包、可重放）。
+     * 二者都由 Boss 自己持有，所以中途进场/换维度/重载都不会看见"只有一半"的演出。
      *
      * <p>注意 zone 与 effect 都是"出招时"由 boss 现算的工厂函数——
      * 招式表是实例级惰性构建的静态数据，落点必须每次施放重算。
@@ -92,10 +96,16 @@ public final class MoveTriggers {
         return (boss, tick) -> {
             var zone = zoneFn.apply(boss);
             var burst = burstFn.apply(boss);
-            zone.broadcast(boss);
+            // 画圈与排队绑成一次原子操作，两个方向都不许单边成立：
+            //   投影已满 → 整发放弃（宁可少一招，不发没预警的伤害）
+            //   队列已满 → 把刚登记的圈撤掉（不留一块永远不炸的假警告）
+            int view = boss.showTelegraph(zone, zone.lifetimeTicks());
+            if (view < 0) return;
             // 排的是数据不是闭包：warn 期间即使区块卸载/Boss 被重载，这一发照样会结算
-            boss.scheduleWork(zone.warnTicks() + 1, com.klze.colossus.env.ZoneWork.KIND,
-                    com.klze.colossus.env.ZoneWork.encode(zone, burst));
+            if (!boss.scheduleWork(zone.warnTicks() + 1, com.klze.colossus.env.ZoneWork.KIND,
+                    com.klze.colossus.env.ZoneWork.encode(zone, burst))) {
+                boss.hideTelegraph(view);
+            }
         };
     }
 
@@ -154,13 +164,13 @@ public final class MoveTriggers {
      * {@link com.klze.colossus.move.MoveSetBuilder.MoveBuilder#repeating} 的复触发帧逐轮结算，
      * 若这里再用 {@link #telegraph} 就会额外挂一次"warnTicks 后爆发"，同一块地被打两遍。
      *
-     * <p>区域的存活时长取 zone 自己的 {@code warnTicks}（客户端按它淡出），
+     * <p>区域的存活时长是 {@code warnTicks + TelegraphZone.FADE_TICKS}（淡出那半秒也算在内），
      * 所以用法是把 warnTicks 配成窗口长度：{@code repeating(20,80,10, circleHit(...))} 配
      * {@code at(20, telegraphVisual(b -> damageCircle(..., warn=60 ...)))}。
      */
     public static MoveTrigger telegraphVisual(
             java.util.function.Function<ColossusBossEntity, com.klze.colossus.env.TelegraphZone> zoneFn) {
-        return (boss, tick) -> zoneFn.apply(boss).broadcast(boss);
+        return (boss, tick) -> zoneFn.apply(boss).show(boss);
     }
 
     // ------------------------------------------------------------------

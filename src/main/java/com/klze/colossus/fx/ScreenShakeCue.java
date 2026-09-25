@@ -1,6 +1,7 @@
 package com.klze.colossus.fx;
 
 import com.klze.colossus.client.ScreenShakeClient;
+import com.klze.colossus.data.JsonCodecs;
 import com.mojang.serialization.Codec;
 import com.mojang.serialization.codecs.RecordCodecBuilder;
 import net.minecraft.network.FriendlyByteBuf;
@@ -17,9 +18,19 @@ public final class ScreenShakeCue {
     /** @param power 最大视角扰动（度）；@param durationTicks 持续；@param radius 世界衰减半径（≤0 全局） */
     public record Data(float power, int durationTicks, float radius) {}
 
+    /**
+     * 震屏参数的 JSON 形状。
+     *
+     * <p>{@code duration_ticks} 用 {@link JsonCodecs#STRICT_INT} 而不是 {@code Codec.INT}
+     * （轮 13 P3-7）：后者在 DFU 6.0.8 里是 {@code getNumberValue().map(Number::intValue)}，
+     * {@code "duration_ticks": 20.5} 会被静默截成 20。本仓已把这条纪律收进
+     * {@code com.klze.colossus.data.JsonCodecs}，此处是全工程最后一个 {@code Codec.INT}——
+     * 现在还没有 datapack 路径调 {@code jsonCodec()}（{@code CueType.jsonCodec} 零调用点），
+     * 但等 cue 进词汇表时再改就会漏掉，这一格先垫平。
+     */
     public static final Codec<Data> CODEC = RecordCodecBuilder.create(i -> i.group(
             Codec.FLOAT.fieldOf("power").forGetter(Data::power),
-            Codec.INT.fieldOf("duration_ticks").forGetter(Data::durationTicks),
+            JsonCodecs.STRICT_INT.fieldOf("duration_ticks").forGetter(Data::durationTicks),
             Codec.FLOAT.fieldOf("radius").forGetter(Data::radius)
     ).apply(i, Data::new));
 
