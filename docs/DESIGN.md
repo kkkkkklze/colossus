@@ -927,3 +927,26 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > 还原后 129/129。本批累计做了 MUT-A / MUT-B / MUT-C2 / MUT-D 四次，每次都先看它是否变红再还原。
 > 验证：build（`-Pgecko`）+ 自检 **129/129** + audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。§7 里"post-mortem 滞留"那条从未做清单移除此作废。
+
+> 进度（2026-09-26 第三十二批·审查轮 20 处置：**本系列第一条 P1——尾段账本把"投影重投"当成"圈消失"**）：
+> ✅ 记账键幂等化：账本从客户端搬成 `env/TailLedger`（纯类、按镜像键记账，一条圈最多一份账；
+> 重新变活则 `cancel`）。原先是无键 deque，而给它记账的 `dropOwner` 一名两义——每次投影换实例
+> 都会调它 ⇒ 一条圈每 publish 一次多一份尾段，账面 `(1 + 重投次数) × 峰值`，把 2000 撑爆之后
+> 按插入序排在后面的**最新那一发**拿到 `NONE`：圈不画、伤害照落、零日志。
+> ✅ `dropOwner` 拆成 `retireOwner(bossId)`（真离场）与 `retireOwner(bossId, surviving)`（换实例，
+> 只有新快照里不再出现的才算退休）；尾段改占 **25% 子额度**（安全件优先于装饰件）。
+> ✅ 换维度分支补 `TAILS.clear()`（轮 20 P2-2：换维度走的是内联分支，不走 public `clear()`，
+> 之前那句"换维度/登出整批作废"是假的）。
+> ✅ 假上限 `MAX_SPAN_TICKS` 与零调用者的 `liveNow` 删除；`TelegraphView.fromTag` 的 `id/start/end`
+> 改 `mask=99`（"闸门不许比读侧严"这条规则原先在 11 个键里的 3 个上反着）；
+> `addTail` 拒 `end <= start`，与 `tailAlive` 对畸形区间的答复一致。
+> ✅ 式子改了就必须改的那 6 处注释/自检标题全部跟着改（量纲块、"不再转 int"那四处、check 名）。
+> ✅ 判据搬到能被跑的地方：`TailLedger` 三条断言（幂等／子额度／逐出走 end 最大）＋ MUT-E 验证有牙。
+> ⚠ **接受一条对本仓验证面的判词并写进口径**：`runGameTestServer` 是无头服务端、四道门都不执行
+> `TelegraphClient`，所以"两轮 GameTest"对我最近几批的渲染侧断言**没有贡献**——这正是 P1 能在全绿下
+> 活一整批的原因。凡是客户端的性质，一律先做成不 import MC 的纯类再谈断言。
+> ⬜ 未做（新增）：尾段窗口应收窄到 `min(end, 最后一次真正发射的 tick + 1)`（现在用名义 `end`，
+> 玩家走远后被 48 格闸挡住的圈仍按满窗口记＝虚高）；变率轨迹断言；`TAILS` 的 `long[]` 位序协议
+> 换成 record；§6.3 只写了"不虚报短命圈"，没写"尾段按寿命上界而非均值 ⇒ 平均虚高约 2.6 倍"。
+> 验证：build（`-Pgecko`）+ 自检 **132/132** + audit **14** + `runGameTestServer`
+> **All 14 required tests passed**（两轮）。

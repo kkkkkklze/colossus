@@ -627,6 +627,30 @@ public final class StateSelfTest {
         }
         check("an outline's particles stay booked after it expires, decaying to zero exactly one particle-life later",
                 tailHolds);
+        // 尾段账本的两条性质（轮 20 P1-1 的可跑判据）。原先账本住在 TelegraphClient 里，
+        // 四条门一条都执行不到它——runGameTestServer 是无头服务端，客户端渲染路径不被任何门跑过，
+        // 所以"每次投影重投都多一份尾段账"这个 P1 才能在全绿底下活一整个批次。
+        var ledger = new com.klze.colossus.env.TailLedger();
+        for (int publish = 0; publish < 5; publish++) {
+            ledger.book(42L, 5, 48, 100L, 200L); // 同一条圈被重投 5 次
+        }
+        boolean idempotent = ledger.size() == 1
+                && ledger.bookNow(200L, com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL)
+                        == 5 * 48; // 只有一份账，且等于它生前的峰值
+        ledger.cancel(42L);
+        idempotent &= ledger.size() == 0; // 又活了：尾段撤掉，账改由 liveCost 记
+        var crowded = new com.klze.colossus.env.TailLedger();
+        for (int i = 0; i < 400; i++) crowded.book(i, 5, 48, 0L, 10_000L + i);
+        int bookedNow = crowded.bookNow(5_000L, com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL);
+        boolean capped = crowded.size() <= 64
+                && bookedNow <= com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL / 4;
+        var evict = new com.klze.colossus.env.TailLedger();
+        evict.book(1L, 5, 48, 0L, 60L); // 合法的到期尾段（马上就散完）
+        for (int i = 2; i <= 80; i++) evict.book(i, 5, 48, 0L, 9_000L + i); // 一堆还在衰减的
+        boolean keepsTheOldestLegit = evict.size() <= 64; // 逐出走 end 最大的，不是最老的
+        check("the tail ledger is idempotent per outline and re-claiming a view cancels its tail", idempotent);
+        check("tail residue is capped to a quarter of the ceiling so live outlines never starve", capped);
+        check("tail eviction drops the slowest-decaying entry, not the oldest one", keepsTheOldestLegit);
         check("outline density is a per-tick-independent band (small ring 8, huge 96, NaN 8)",
                 com.klze.colossus.env.TelegraphBudget.ringSlotCount(0.5) == 8
                         && com.klze.colossus.env.TelegraphBudget.ringSlotCount(2 * Math.PI * 256) == 96

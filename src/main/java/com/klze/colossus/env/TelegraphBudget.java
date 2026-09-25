@@ -7,21 +7,23 @@ package com.klze.colossus.env;
  * 这两道闸的判据必须在<b>最快的那道门</b>（{@code colossusSelfTest}）里能跑红。留在客户端类里，
  * 自检就要链接 {@code TelegraphClient → RingZoneRenderer → RenderType} 这条链——今天它能跑只是因为
  * {@code RenderType} 恰好只在方法体里被解析；哪天有人给渲染器加一句
- * {@code static final RenderType T = RenderType.LINES;}，红掉的是<b>整道门（现 128 条）</b>而不是那条断言。
+ * {@code static final RenderType T = RenderType.LINES;}，红掉的是<b>整道门（现 132 条）</b>而不是那条断言。
  * 挪到这里之后，本类不 import 任何 MC 类型，门就再也扣不到运气上。
  *
- * <p><b>量纲</b>（这条轴连错四轮，写死在这儿）：成本 = <b>场上峰值存活数</b> =
- * {@code 每 tick 生成率 × 粒子自身寿命}。四个时间量必须分开，别混：
+ * <p><b>量纲</b>（这条轴连错四轮，写死在这儿）：成本 = <b>这颗圈一生里最多同时占用的粒子数</b>
+ * ＝ {@code 每 tick 生成率 × min(粒子自身寿命, 发射窗口)}。四个时间量必须分开，别混：
  * <ul>
  *   <li>{@code particleLife}：粒子自己在场上活几 tick（{@link #DUST_LIVE_TICKS} /
  *       {@link #SPARK_LIVE_TICKS}，从 vanilla 原文回读）——<b>成本与覆盖都除以它</b>；</li>
  *   <li>{@code elapsed}（{@code now - start}）：这颗圈<b>已经</b>撒了几 tick——决定当前真实存活
- *       （{@code min(粒子寿命, elapsed) × 率}），所以记账用"率 × 粒子寿命"是<b>峰值</b>口径，
- *       在出生的头几 tick 会略微高报，这个方向的误差是安全的；</li>
+ *       （{@code 率 × min(粒子寿命, elapsed)}），所以记账在出生的头几 tick 会略微高报
+ *       （安全方向），在 {@code now = end} 那一 tick 恰好等于它——那是它的<b>一生峰值</b>；</li>
  *   <li>{@code remaining}（{@code end - now}）：还剩几 tick 停止发射——<b>不进成本</b>。
  *       轮 19 P2-1 抓到的正是把它当成本因子：那数的是"还要撒几个"，而只剩 1 tick 的大圈
  *       实际还占着 197 个场上粒子，记成 5 个就把全局闸绕过去了（低报 39 倍）；</li>
- *   <li>整发寿命 {@code end - start}：只用于到期与淡出（{@code TelegraphZone.lifetimeTicks()}）。</li>
+ *   <li>整发寿命 {@code end - start}＝<b>发射窗口</b>：进成本（被粒子寿命截一段），也用于到期与淡出。
+ *       轮 20 的两头错法都记在这儿：只按"剩余时间"记会<b>低报</b>（数的是还要撒几个），
+ *       按"满粒子寿命"记会<b>高报</b>（{@code warn=0} 的圈只发射 11 tick 却按 48 记，虚报 4 倍多）。</li>
  * </ul>
  * 另一个好处：率与槽位现在都是<b>每发常量</b>，不再逐 tick 变化 ⇒ 轮转的相位不会跳、
  * 角位映射不会重排（轮 19 P2-1 的副产物一并消失）。
@@ -162,27 +164,18 @@ public final class TelegraphBudget {
     }
 
     /**
-     * 发射窗口（{@code end - start}，非负、并在转 int 之前钳住）。
-     * 轮 19 P3-4 的 {@code (int)} 截断危险在这里消除：先钳再转，而不是靠调用方记得兜。
+     * 发射窗口（{@code end - start}，负数当 0）。<b>刻意不设"业务上限"</b>（轮 20 P3-1）：
+     * 上一版把它钳到 1_000_000，而 {@code showTelegraph} 允许登记更长寿命，那个常量就成了
+     * 对定义域的谎报，与轮 19 撤掉 1210 的理由逐字同构。int 安全性由调用点保证：
+     * {@code window = (int) min(粒子寿命, span)}，结果天然 ≤ 粒子寿命（轮 19 P3-4 的截断危险
+     * 由"只剩这一处转换、且转换前已被截"消除）。
      */
     public static long emissionSpan(long startGameTime, long endGameTime) {
         long span = endGameTime - startGameTime;
-        if (span <= 0L) return 0L;
-        return Math.min(span, MAX_SPAN_TICKS);
+        return span > 0L ? span : 0L;
     }
 
-    /** 发射窗口的安全上界：只用于防止 long→int 截断，不是"业务上最大的圈"。 */
-    public static final long MAX_SPAN_TICKS = 1_000_000L;
 
-    /**
-     * 一颗"<b>还在发射</b>"的圈此刻实际占几个粒子：过去 {@code 粒子寿命} tick 内撒的那些还没消失
-     * （出生之前没有），即 {@code 率 × min(粒子寿命, now - start)}。与 {@code liveCost}（一生峰值）
-     * 同一个式子在 {@link #tailAlive} 里复用，所以两处不会各写一份算错。
-     */
-    public static int liveNow(int ratePerTick, int particleLife, long startGameTime, long endGameTime,
-                              long nowGameTime) {
-        return tailAlive(ratePerTick, particleLife, startGameTime, endGameTime, nowGameTime);
-    }
 
     private TelegraphBudget() {}
 }

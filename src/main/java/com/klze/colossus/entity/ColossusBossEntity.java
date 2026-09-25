@@ -325,9 +325,11 @@ public abstract class ColossusBossEntity extends Monster {
 
         static @Nullable TelegraphView fromTag(net.minecraft.nbt.Tag t) {
             if (!(t instanceof CompoundTag tag)) return null;
-            if (!tag.contains("id", net.minecraft.nbt.Tag.TAG_INT)) return null; // 残缺：丢掉，别在渲染路径炸
-            if (!tag.contains("start", net.minecraft.nbt.Tag.TAG_LONG)
-                    || !tag.contains("end", net.minecraft.nbt.Tag.TAG_LONG)) return null; // 同上（轮 18 P3-4）
+            // 三个键都用 mask=99，与本批给几何键定下的口径一致（轮 20 P3-8）：contains 是精确类型相等，
+            // 而 getInt/getLong 内部走 99 —— 用精确类型会让 putInt("start", …) 的载荷被整条静默丢弃，
+            // 投影侧连一行日志都没有＝圈不画、伤照落。
+            if (!tag.contains("id", 99)) return null; // 残缺：丢掉，别在渲染路径炸
+            if (!tag.contains("start", 99) || !tag.contains("end", 99)) return null; // 同上（轮 18 P3-4）
             // 几何缺件也丢：CompoundTag 的 getDouble/getString 对缺失返回 0/""（不抛），
             // 一份截断的 tag 就会读成"世界原点一个 1 格圈"，而同一条待办里还带着伤害
             // ——看不见的圈照样落伤，正是本仓最反对的失败模式（轮 18 P3-3）。
