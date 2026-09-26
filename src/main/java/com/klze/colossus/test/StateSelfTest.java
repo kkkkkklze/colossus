@@ -36,6 +36,7 @@ public final class StateSelfTest {
         testFrameAdvanceIdempotent();
         testFrameRepeatingFiresEveryPeriod();
         testFrameRepeatingSkipsBeatsWithoutCompensation();
+        testFrameTimelineResume();
         testMoveAnimNameDomain();
         testMoveHistoryRing();
         testContactBook();
@@ -398,6 +399,93 @@ public final class StateSelfTest {
                 .move("w3").duration(10).notRecent(3).at(1, null).done().builtDefs().get(0);
         check("notRecent is data the engine can see (MoveDef.notRecent), not an opaque predicate",
                 gated.notRecent() == 3);
+    }
+
+    /**
+     * 时间线快照/续播（v12a 的形态：存"招内相对 tick + 已触发位图"，不存绝对时刻）。
+     * 这里钉的是<b>行为</b>而不是实现式子：重放、漏放、位图撒谎、超出位图宽度。
+     */
+    private static void testFrameTimelineResume() {
+        List<Integer> hit = new ArrayList<>();
+        var runner = FrameRunner.<List<Integer>>builder()
+                .between(2, 10, (c, tick) -> c.add(tick))
+                .build();
+        for (int t = 1; t <= 5; t++) runner.advance(hit, t);
+        check("baseline: the window frame fired exactly once before the snapshot",
+                hit.equals(List.of(2)) && runner.lastTick() == 5 && runner.firedBitmap() != 0L);
+
+        // 存档恢复：同一个 runner 被重建，位图却"撒谎"（一位没置上）——绝不允许重放
+        var restored = FrameRunner.<List<Integer>>builder()
+                .between(2, 10, (c, tick) -> c.add(tick))
+                .build();
+        restored.resumeFrom(5, 0L);
+        for (int t = 6; t <= 12; t++) restored.advance(hit, t);
+        check("resume never replays a window whose start has already passed, even if the bitmap lost its bit",
+                hit.equals(List.of(2)) && restored.lastTick() == 12);
+
+        // 反过来：位图里提前置了"窗口还没到"的那一帧 ⇒ 宁少发一次，也不在恢复后重放
+        List<Integer> early = new ArrayList<>();
+        var r2 = FrameRunner.<List<Integer>>builder()
+                .between(2, 4, (c, tick) -> c.add(tick))
+                .between(8, 9, (c, tick) -> c.add(tick))
+                .build();
+        r2.resumeFrom(5, 0b11L); // 第二帧（i=1）窗口在 8，但位图说它已触发
+        for (int t = 6; t <= 12; t++) r2.advance(early, t);
+        check("a bit set for a frame whose window has not arrived suppresses that frame (never double-fire)",
+                early.isEmpty());
+
+        // 持续帧与位图无关：恢复不打断它的节拍，也不补已错过的拍
+        List<Integer> rep2 = new ArrayList<>();
+        var r3 = FrameRunner.<List<Integer>>builder()
+                .repeating(1, 12, 3, (c, tick) -> c.add(tick))
+                .build();
+        r3.resumeFrom(4, 0L);
+        for (int t = 5; t <= 12; t++) r3.advance(rep2, t);
+        check("repeating frames keep their own period after resume (1,4,7,10 minus what already passed)",
+                rep2.equals(List.of(7, 10)));
+
+        // 快照能往返：同一份 (tick, bitmap) 恢复两次，后续触发序列必须完全一致
+        var a = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).at(9, (c, tk) -> c.add(tk)).build();
+        List<Integer> scratch = new ArrayList<>(); // 不能用 List.of()：帧的回调就是 c.add(...)，不可变表会抛 UOE
+        a.advance(scratch, 3); a.advance(scratch, 4);
+        long bits = a.firedBitmap(); int at = a.lastTick();
+        List<Integer> s1 = new ArrayList<>();
+        List<Integer> s2 = new ArrayList<>();
+        var b1 = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).at(9, (c, tk) -> c.add(tk)).build();
+        var b2 = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).at(9, (c, tk) -> c.add(tk)).build();
+        b1.resumeFrom(at, bits); b2.resumeFrom(at, bits);
+        for (int t = 5; t <= 12; t++) { b1.advance(s1, t); b2.advance(s2, t); }
+        check("the same snapshot restored twice yields the identical trigger sequence (deterministic)",
+                s1.equals(s2) && s1.equals(List.of(9)));
+
+        // 位图宽度是硬上界：超了就在登记期抛，不许静默截断
+        boolean rejected = false;
+        try {
+            var big = FrameRunner.builder();
+            for (int i = 1; i <= 65; i++) big.at(i, (c, tk) -> { });
+            big.build();
+        } catch (IllegalArgumentException expected) {
+            rejected = true;
+        }
+        check("a frame table wider than the persistence bitmap is rejected at build time (no silent truncation)",
+                rejected);
+        boolean fits = false;
+        try {
+            var exactly = FrameRunner.builder();
+            for (int i = 1; i <= 64; i++) exactly.at(i, (c, tk) -> { });
+            exactly.build();
+            fits = true;
+        } catch (IllegalArgumentException e) {
+            fits = false;
+        }
+        check("64 frames still build (the cap boundary is inclusive, both ends pinned)", fits);
+
+        check("resume rejection: a stale or nonsense timeline is refused with a reason",
+                FrameRunner.resumeRejection(50, 20, 0) != null
+                        && FrameRunner.resumeRejection(5, 20, 999) != null
+                        && FrameRunner.resumeRejection(-1, 20, 0) != null
+                        && FrameRunner.resumeRejection(2, 0, 0) != null
+                        && FrameRunner.resumeRejection(5, 20, 14) == null);
     }
 
     private static void testFrameSingleShot() {

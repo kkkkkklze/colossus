@@ -950,3 +950,22 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > 换成 record；§6.3 只写了"不虚报短命圈"，没写"尾段按寿命上界而非均值 ⇒ 平均虚高约 2.6 倍"。
 > 验证：build（`-Pgecko`）+ 自检 **132/132** + audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。
+
+> 进度（2026-09-26 第三十三批·状态栈快照的<b>第一半</b>：帧时间线的续播语义）：
+> ✅ `FrameRunner` 新增 `firedBitmap()` / `lastTick()` / `resumeFrom(tickAt, bitmap)` /
+> `resumeRejection(stateTick, duration, elapsed)`（v12a 定下的形态：存<b>招内相对 tick + 已触发位图</b>，
+> 不存绝对 gameTime——存绝对时刻会把"卸载十秒"判成"这招早该结束"，而玩家预期是从断掉处放完）。
+> ✅ 续播只有一条语义：<b>不补偿、不重放</b>。窗口起点已过的帧一律记成已消费（存档位图丢一位也不许
+> 在恢复后第一个 tick 重放一发伤害）；位图提前置位的未到期帧也只是被抑制（宁少发一次不发两遍）；
+> 持续帧与位图无关（节拍是 tick 的纯函数）。`lastTick` 只许前进，倒退输入被拒（防重放整段窗口）。
+> ✅ 位图宽度＝64 是硬上界，`Builder.build()` 在<b>登记期</b>抛（与 datapack 侧同值的
+> `MoveCodec.MAX_FRAMES_PER_MOVE` 同一规则，两条入口一套口径），不静默截断。
+> ✅ 判据是<b>行为</b>不是式子：重放、漏放、位图撒谎、同一快照恢复两次的确定性、边界 64 收 / 65 拒；
+> 并按本批起的固定动作做了变异抽查 **MUT-F**（去掉"窗口已过一律记为已消费"这一半）⇒
+> `resume never replays a window…` 变红（`1/140`），还原后 140/140。
+> ⬜ 本批<b>没做</b>的第二半（下一批）：`StateController.snapshot()` 目前只返回内存里的栈副本，
+> 还没有把 (招名, 招内 tick, 位图) 写进 NBT 的 `colossus_state_name` / `colossus_state_start` /
+> `colossus_frames_fired` 三个键，也没有恢复期的"查不到招名就回 idle + 打一行 `Refusing to resume …`"。
+> 也就是说<b>现在还没有任何运行期持久化</b>——这批只把"恢复时对错的判据"做成了可断言的纯函数。
+> 验证：build（`-Pgecko`）+ 自检 **140/140**（132→140）+ audit **14** + `runGameTestServer`
+> **All 14 required tests passed**（两轮）。

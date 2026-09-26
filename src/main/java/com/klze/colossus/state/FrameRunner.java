@@ -111,7 +111,17 @@ public final class FrameRunner<C> {
             return this;
         }
 
-        public FrameRunner<C> build() { return new FrameRunner<>(List.copyOf(frames)); }
+        public FrameRunner<C> build() {
+            // 登记期就拒（同"坏窗口在登记期抛"那条纪律）：超过位图宽度的帧表<b>存不下来也恢复不了</b>，
+            // 让它静默截断会把第 65 帧之后的触发状态丢掉——存档恢复时那一发要么重放要么漏放。
+            // datapack 侧本来就有同值的拒（MoveCodec.MAX_FRAMES_PER_MOVE），两条入口一套规则。
+            if (frames.size() > MAX_PERSISTABLE_FRAMES) {
+                throw new IllegalArgumentException("frame table has " + frames.size()
+                        + " entries, over the " + MAX_PERSISTABLE_FRAMES
+                        + " that a persistence bitmap can hold; split the move or drop frames");
+            }
+            return new FrameRunner<>(List.copyOf(frames));
+        }
     }
 
     /**
@@ -146,4 +156,76 @@ public final class FrameRunner<C> {
     public int frameCount() { return frames.size(); }
 
     public List<Frame<C>> frames() { return frames; }
+
+    // ==================== 时间线快照 / 续播（v12a 定下的形态）====================
+    //
+    // 取证结论（`深挖__BOSS引擎调研v12a__施法时间线续播取证.md`）：全库没有一家把"帧时间线"
+    // 本身持久化；活下来的样本存的都是<b>招内相对 tick + 阶段</b>（FDLib AttackChain、首领崛起
+    // AttackPhase/AttackAnimtime），绝对 gameTime 只用来判"这份存档还新不新"。
+    // 所以这里存的不是"世界时刻"而是 (招内 tick, 已触发位图)——把它写成绝对时刻的那一版
+    // 会得出"卸载十秒后这招早该结束"，而玩家预期是"从断掉处继续放完"。
+
+    /** 位图只有一个 long 的宽度，所以这既是快照的上界、也是 {@link Builder#build()} 的上界。 */
+    public static final int MAX_PERSISTABLE_FRAMES = 64;
+
+    /**
+     * 已触发位图：第 i 位＝{@code frames().get(i)} 这个<b>一次性</b>帧是否已被消费。
+     * 持续帧不在位图语义里（它是否触发是 tick 的纯函数，位图设了也不影响它）。
+     */
+    public long firedBitmap() {
+        long bits = 0L;
+        for (int i = 0; i < fired.length; i++) {
+            if (fired[i]) bits |= 1L << i;
+        }
+        return bits;
+    }
+
+    /** 已经推进到的招内 tick（从未 advance 过＝{@link Integer#MIN_VALUE}）。 */
+    public int lastTick() { return this.lastTick; }
+
+    /**
+     * 从一份快照续播。语义只有一条：<b>不补偿、不重放</b>。
+     *
+     * <p> {@code tickAt} 是存档里的"招内已跑 tick"，{@code bitmap} 是当时的已触发位图。
+     * 两者可能来自被手改过的存档，所以这里做两件事：
+     * <ul>
+     *   <li><b>窗口已过的帧一律记成"已消费"</b>——那正是 {@code advance} 当时会做的事
+     *       （进入即消费，错过不补）。不这么做的话，一位没置上就会让那一发在续播的
+     *       第一个 tick 上<b>重放一次伤害</b>（存档错一位＝白挨一刀）。</li>
+     *   <li>位图里那些"窗口还没到"的位被设上了，也只是提前记成已消费（宁少不发两遍）。</li>
+     * </ul>
+     * 持续帧两边都不影响：它出不出帧只由 {@code (tick - from) % period} 决定。
+     */
+    public void resumeFrom(int tickAt, long bitmap) {
+        this.lastTick = Math.max(tickAt, this.lastTick); // 绝不允许倒退：倒退会重放整段窗口
+        for (int i = 0; i < frames.size(); i++) {
+            Frame<C> f = frames.get(i);
+            if (f.repeating()) continue;               // 持续帧无状态，位图对它没意义
+            boolean passed = f.from() <= tickAt;       // 窗口起点已经过了 ⇒ 当时一定已被消费
+            boolean claimed = (bitmap & (1L << i)) != 0L;
+            this.fired[i] = passed || claimed;
+        }
+    }
+
+    /**
+     * 续播前的<b>作废判据</b>（纯函数）：存档里那发"招内 tick"距离现在是否还合理。
+     *
+     * <p>存绝对时刻会在这里说谎：卸载/换维度期间游戏钟不走，用 {@code gameTime} 推"这招该结束了"
+     * 会把一次正常的存档恢复判成过期（v12a 的三家对照里只有这一档语义安全）。
+     * 所以 {@code elapsedTicksWhileLoaded} 由调用方给（"这一发从恢复点到现在又跑了多少 tick"），
+     * 只有<b>超出整招长度</b>才拒。
+     *
+     * @return null＝可以续播；否则给出一条能直接进日志的理由
+     */
+    public static String resumeRejection(int stateTick, int durationTicks, int elapsedTicksWhileLoaded) {
+        if (durationTicks < 1) return "duration " + durationTicks + ": non-positive, nothing to resume";
+        if (stateTick < 0) return "stateTick " + stateTick + ": negative";
+        if (stateTick >= durationTicks) {
+            return "stateTick " + stateTick + " is past duration " + durationTicks + " (attack already over)";
+        }
+        if (elapsedTicksWhileLoaded > durationTicks) {
+            return "elapsed " + elapsedTicksWhileLoaded + " exceeds duration " + durationTicks;
+        }
+        return null;
+    }
 }
