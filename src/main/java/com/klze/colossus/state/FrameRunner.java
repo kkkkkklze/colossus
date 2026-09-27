@@ -112,13 +112,15 @@ public final class FrameRunner<C> {
         }
 
         public FrameRunner<C> build() {
-            // 登记期就拒（同"坏窗口在登记期抛"那条纪律）：超过位图宽度的帧表<b>存不下来也恢复不了</b>，
-            // 让它静默截断会把第 65 帧之后的触发状态丢掉——存档恢复时那一发要么重放要么漏放。
-            // datapack 侧本来就有同值的拒（MoveCodec.MAX_FRAMES_PER_MOVE），两条入口一套规则。
+            // 登记期就拒（同"坏窗口在登记期抛"那条纪律）。<b>超界的真实后果是别名，不是截断</b>
+            // （审查轮 22 P3-3）：`firedBitmap()` 与 `resumeFrom()` 都用 `1L << i`，而 Java 的 long
+            // 移位<b>取模 64</b> ⇒ 第 65 帧（i=64）不是"存不下"，是<u>写到第 1 帧的 bit 0 上</u>：
+            // 一次恢复会同时"重放 1 号"和"缴械 65 号"。放宽这道闸的人必须看见这句话。
+            // datapack 侧同值拒现在直接引这个常量（`MoveCodec` 不再自备第二个 64），两条入口一套规则。
             if (frames.size() > MAX_PERSISTABLE_FRAMES) {
                 throw new IllegalArgumentException("frame table has " + frames.size()
                         + " entries, over the " + MAX_PERSISTABLE_FRAMES
-                        + " that a persistence bitmap can hold; split the move or drop frames");
+                        + " that a persistence bitmap can hold (bits alias mod 64); split the move or drop frames");
             }
             return new FrameRunner<>(List.copyOf(frames));
         }
@@ -203,7 +205,13 @@ public final class FrameRunner<C> {
             if (f.repeating()) continue;               // 持续帧无状态，位图对它没意义
             boolean passed = f.from() <= tickAt;       // 窗口起点已经过了 ⇒ 当时一定已被消费
             boolean claimed = (bitmap & (1L << i)) != 0L;
-            this.fired[i] = passed || claimed;
+            // <b>或上已有状态，不是覆盖</b>（审查轮 22 P2-1）：`lastTick` 走了 `Math.max` 而这里走覆盖，
+            // 两侧不对称。反例（帧表 [0]=between(2,10)、[1]=between(20,25)）：advance 到 21 后
+            // fired=[true,true]；一份<b>更旧</b>的快照 `resumeFrom(5, 0)` 会把 fired[1] 解除武装
+            // （20<=5 为假、位图第 1 位为 0），于是 advance(22) 在窗口内<b>再触发一次</b>——
+            // 正是本类 javadoc 那句"存档错一位＝白挨一刀"，只是换了入口。
+            // tick 与位图<b>两侧都只许前进</b>；要回退整张表只有一个合法手段：换新 runner。
+            this.fired[i] = this.fired[i] || passed || claimed;
         }
     }
 
@@ -223,8 +231,17 @@ public final class FrameRunner<C> {
         if (stateTick >= durationTicks) {
             return "stateTick " + stateTick + " is past duration " + durationTicks + " (attack already over)";
         }
-        if (elapsedTicksWhileLoaded > durationTicks) {
-            return "elapsed " + elapsedTicksWhileLoaded + " exceeds duration " + durationTicks;
+        if (elapsedTicksWhileLoaded < 0) {
+            return "elapsed " + elapsedTicksWhileLoaded + ": negative";
+        }
+        // <b>两段合起来也要落在整招长度内</b>（审查轮 22 P3-2）：原先各自单独和 duration 比，
+        // 于是 `resumeRejection(95, 100, 100)` 放行——而那一刻这招已经走到第 195 帧、整招只有 100 帧。
+        // javadoc 那句"只有超出整招长度才拒"按字面就是 `stateTick + elapsed > duration`。
+        // 用 long 求和：两个 int 相加可以溢出成负数，那会把"最越界"的一档判成放行。
+        long arrivedAt = (long) stateTick + (long) elapsedTicksWhileLoaded;
+        if (arrivedAt > durationTicks) {
+            return "stateTick " + stateTick + " + elapsed " + elapsedTicksWhileLoaded
+                    + " = " + arrivedAt + " exceeds duration " + durationTicks;
         }
         return null;
     }

@@ -91,6 +91,36 @@ public final class TelegraphBudget {
     // 那句话与它冲突（轮 19 P3-2）。截断危险由"不存在转换"消除，而不是由一个数字上限掩盖。
 
     /**
+     * 本地钟是否<b>落后超过一整个寿命</b>（落后太多就不画这一发）。
+     *
+     * <p>式子原先写在 {@code TelegraphClient.tick()} 里。搬进来的理由不是好看，是
+     * <b>四条门跑不到 {@code client/*}</b>，而"要不要记这条圈的发射事实"就取决于这一判
+     * （审查轮 22 P2-7）。新 {@code ClientLevel} 的 gameTime 从 0 起算，所以这条只在
+     * respawn/SetTime 被 netty 拆到不同批时才成立；代价与收益见调用点注释。
+     */
+    public static boolean clockTooFarBehind(long startGameTime, long endGameTime, long nowGameTime) {
+        return nowGameTime < startGameTime - emissionSpan(startGameTime, endGameTime);
+    }
+
+    /**
+     * 这一 tick 这条圈<b>会不会真的往世界里撒粒子</b>——三道门任一成立就不撒，
+     * 于是也<b>不该</b>向 {@link TailLedger} 提交"我发射过"的事实。
+     *
+     * <p>为什么单独成函数（轮 22 P2-7，{@code OutlineFrame} 的最小可用版）：发射事实的
+     * <b>判据</b>原先只是散在 {@code spawnOutlineParticles} 里三个 early-return 的相对位置上。
+     * 摆放今天是对的，但没有任何纯类断言钉住它——把记账点挪到距离剔除之前、或新加一条落在
+     * 记账点之后的 early-return（少撒了却记满率＝低报；反之＝幽灵账），141 条自检会<b>全绿</b>。
+     * 收成一个纯函数之后，"三门与记账的先后"第一次变成能在最快的门上跑红的东西。
+     *
+     * @param culledByDistance 玩家离圆环太远（含"玩家为 null 时不剔除"的口径）
+     * @param outOfBudget      {@link #plan} 交回 {@link Outline#empty()}（全局额度已被前面的圈用完）
+     * @param clockBehind      {@link #clockTooFarBehind}
+     */
+    public static boolean emitsThisTick(boolean culledByDistance, boolean outOfBudget, boolean clockBehind) {
+        return !culledByDistance && !outOfBudget && !clockBehind;
+    }
+
+    /**
      * 一颗<b>已经停止发射</b>的圈（轮廓到点被移出投影表）此刻还占着多少活跃粒子。
      *
      * <p>为什么需要它（轮 19 遗留的 post-mortem 滞留）：轮廓条目在 {@code end} 那一 tick 就没了，
@@ -112,7 +142,17 @@ public final class TelegraphBudget {
         long from = Math.max(startGameTime, nowGameTime - life);
         long to = Math.min(endGameTime, nowGameTime);
         long span = to - from;
-        if (span <= 0L) return 0;
+        // <b>只有"本地钟还没走到这一发的发射起点"才按满峰值记</b>（审查轮 22 §0 第 3 行；判据见 P2-4）：
+        // 正常的尾段恒有 end <= now，走不到这一支；走得到的是换维度/重生的那批——新 ClientLevel
+        // 从 gameTime=0 起算，而登记时刻来自服务端（可达几千），原先这里交出 0，等于在最该保守
+        // 的时刻把已经撒出去的粒子记成不存在。与本文件既有口径一致：<b>宁压不假</b>
+        // （TelegraphClient 的"落后超过一整个寿命才不画"是同方向的选择）。
+        // 归零的另一头不能被这一支误伤：now 在 (start, end+life) 之内都走正常求交，
+        // 只有 now <= start 才进这里。
+        if (span <= 0L) {
+            if (nowGameTime > startGameTime) return 0;             // 已散干净 / 尚未开始：真 0
+            return ratePerTick * (int) Math.min(life, emissionSpan(startGameTime, endGameTime));
+        }
         return ratePerTick * (int) Math.min(span, life);
     }
 

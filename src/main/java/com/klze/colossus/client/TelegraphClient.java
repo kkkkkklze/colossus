@@ -224,12 +224,9 @@ public final class TelegraphClient {
         while (zones.hasNext()) {
             Live z = zones.next().getValue();
             if (z.endGameTime <= now) continue; // 上面那一趟已经把它转成尾段并移除了
-            // 本地钟<b>落后超过一整个寿命</b>才不画（轮 16 P3-7 把措辞改成与实现一致）：
-            // 新 ClientLevel 的 gameTime 起点是 0（ClientLevelData 构造器不设该字段，靠 tickTime 自增），
-            // 只有 respawn 与 SetTime 被 netty 拆到不同批时才会看到那种量级的错位。
-            // 代价与收益都写清：正常补包晚 1~3 tick 不会误伤（span 最小 11）；反过来单程延迟若真超过
-            // 一整个寿命（约 550ms 起，对最短的那批圈），这里会压掉开头几 tick——宁压不假。
-            if (now < z.startGameTime - (z.endGameTime - z.startGameTime)) continue;
+            // 本地钟落后判据已搬进 spawnOutlineParticles 的三道门之一（轮 22 P2-7）：
+            // 原先这里是 `if (clockTooFarBehind) continue;`，于是"落后多少才不画"和
+            // "记不记这条圈的发射事实"之间的关系<b>没有任何断言看着</b>——四条门不执行 client/*。
             if (!hasStyle(z.visual)) spawnOutlineParticles(mc, z); // 几何档接管时不双份表现
         }
     }
@@ -311,7 +308,8 @@ public final class TelegraphClient {
                 Live z = RENDER_SNAPSHOT.get(i);
                 ZoneRenderer r = STYLES.get(z.visual);
                 if (r == null) continue;
-                if (nowGameTime < z.startGameTime - (z.endGameTime - z.startGameTime)) continue; // 同 tick()：钟没对上就不画
+                if (com.klze.colossus.env.TelegraphBudget.clockTooFarBehind(
+                        z.startGameTime, z.endGameTime, nowGameTime)) continue; // 与粒子档同一道判据（轮 22 P3-3：同一个式子不许有两份写法）
                 double x = z.center.x - camPos.x, y = z.center.y - camPos.y, zz = z.center.z - camPos.z;
                 double pad = z.radiusXZ + 0.5;
                 double vpad = Math.max(1.0, z.radiusY + 0.5);
@@ -370,14 +368,24 @@ public final class TelegraphClient {
 
     /** 粒子档：沿轮廓撒一圈。预算式子全在 {@link com.klze.colossus.env.TelegraphBudget}。 */
     private static void spawnOutlineParticles(Minecraft mc, Live z) {
+        // 三道门收成一个纯判据（轮 22 P2-7）：原先它们只是三个 early-return 的<u>相对位置</u>，
+        // 而"记不记发射事实"完全取决于这个位置——把下面 noteEmission 挪到距离剔除之前、
+        // 或新增一条落在它之后的 early-return，141 条自检会全绿（四条门不执行 client/*）。
+        // 现在"三门任一成立 ⇒ 不撒 ⇒ 也不记"住在 TelegraphBudget 里、由自检钉住，这里只负责喂三个条件。
         // 按到圆环最近点算，不是到圈心（轮 16 P2-2）：到圈心的话，玩家站在大圈的边缘
         // ——最需要看见它的人——反而整圈一个粒子都不撒，而这道闸恰恰是为了替代
         // vanilla 那条"逐粒子对相机算"的闸（LevelRenderer:2511）而加的，不能比它更严。
-        // !(d <= LIMIT) 而不是 d > LIMIT：后者对 NaN 判 false ⇒ fail-open（轮 17 P3-5）。
-        // 半径/圆心那侧在 TelegraphZone 构造器就被钳成有限值了，所以这一道是第二层而不是唯一一层——
-        // 说清免得下游以为"到这里坐标一定正常"：Live 也可由第三方直接构造，框架不依赖那个假设。
-        if (mc.player != null && !(nearOutlineDistSq(mc.player, z) <= PARTICLE_CULL_DIST_SQ)) return;
+        boolean culledByDistance = mc.player != null
+                && !(nearOutlineDistSq(mc.player, z) <= PARTICLE_CULL_DIST_SQ);
         long now = mc.level.getGameTime();
+        // <b>本地钟落后超过一整个寿命</b>才不画（轮 16 P3-7 定的措辞，轮 22 P2-7 把它从 tick() 里的
+        // 一个 `continue` 搬成这里的一道门）：新 ClientLevel 的 gameTime 起点是 0
+        // （ClientLevelData 构造器不设该字段，靠 tickTime 自增），只有 respawn 与 SetTime 被 netty
+        // 拆到不同批时才会看到那种量级的错位。代价与收益都写清：正常补包晚 1~3 tick 不会误伤
+        // （span 最小 11）；反过来单程延迟若真超过一整个寿命（约 550ms 起，对最短的那批圈），
+        // 这里会压掉开头几 tick——宁压不假。
+        boolean clockBehind = com.klze.colossus.env.TelegraphBudget.clockTooFarBehind(
+                z.startGameTime, z.endGameTime, now);
         // 预算只吃<b>每发常量</b>（周长、粒子寿命、这一发的发射窗口），不吃"还剩几 tick"：
         // 成本＝这颗圈<b>一生里最多同时</b>占的粒子数＝率 × min(粒子寿命, 发射窗口)。
         // 轮 19 用"剩余时间"是低报（数的是还要撒几个），轮 20 发现记满粒子寿命是高报
@@ -385,7 +393,11 @@ public final class TelegraphClient {
         var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * z.radiusXZ,
                 z.particleLife, z.startGameTime, z.endGameTime,
                 com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL - liveParticleEstimate);
-        if (plan.empty()) return; // 全局额度已被前面的圈用完：变稀/暂不画，而不是把帧率换掉
+        // 半径/圆心那侧在 TelegraphZone 构造器就被钳成有限值了，所以这一道是第二层而不是唯一一层——
+        // 说清免得下游以为"到这里坐标一定正常"：Live 也可由第三方直接构造，框架不依赖那个假设。
+        if (!com.klze.colossus.env.TelegraphBudget.emitsThisTick(culledByDistance, plan.empty(), clockBehind)) {
+            return; // 太远 / 额度已被前面的圈用完（变稀、暂不画，而不是把帧率换掉）/ 钟还没对上
+        }
         // "真发射到什么程度"记在账本里而不是记在 Live 上（轮 21 P2-3）：Live 每次投影换实例都会重建，
         // 挂在它上面的采样值还会在 plan.empty() 那一支被显式归零——于是"额度被别人抢光"的那些 tick
         // 里真撒过的粒子永久掉账，而那恰恰是最需要记账的时刻。

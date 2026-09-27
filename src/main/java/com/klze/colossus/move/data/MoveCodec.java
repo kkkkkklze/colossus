@@ -39,8 +39,14 @@ import java.util.function.ToIntFunction;
  */
 public final class MoveCodec {
 
-    /** 单条招式最多多少帧（轮6 P2-4：记录数封了 512，帧数不封就是"一条记录钉住主线程"）。 */
-    private static final int MAX_FRAMES_PER_MOVE = 64;
+    /**
+     * 单条招式最多多少帧（轮6 P2-4：记录数封了 512，帧数不封就是"一条记录钉住主线程"）。
+     * <b>引 {@link com.klze.colossus.state.FrameRunner#MAX_PERSISTABLE_FRAMES}，不再自备字面量</b>
+     * （审查轮 22 P3-3）：原先这里写死第二个 64、只在注释里和 Java 侧互相指认——与 `a8337dc`
+     * 自己修掉的"镜像键两处各写一份位运算"是同一个病，漂移一次就会让 JSON 侧放行、位图侧别名。
+     */
+    private static final int MAX_FRAMES_PER_MOVE =
+            com.klze.colossus.state.FrameRunner.MAX_PERSISTABLE_FRAMES;
 
     /** 触发器嵌套上限（once 套 once…；防深递归把栈打穿——SOE 不是 RuntimeException，loader 抓不住）。 */
     private static final int MAX_TRIGGER_DEPTH = 8;

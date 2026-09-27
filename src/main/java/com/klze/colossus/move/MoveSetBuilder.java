@@ -208,6 +208,17 @@ public final class MoveSetBuilder {
         }
 
         public MoveSetBuilder done() {
+            // 帧表上界必须在<b>登记期</b>拒，不能只留在 {@code FrameRunner.Builder.build()}：
+            // build() 的调用点是 {@code MoveDef.newRunner()}，那在<b>出招那一 tick</b> 才跑
+            // （AttackState 构造器）。JSON 侧早有同值拒（MoveCodec.MAX_FRAMES_PER_MOVE），
+            // 但 Java DSL 这条路没有——下游模组写 65 帧就会在 BOSS 打到一半时抛异常炸服务端，
+            // 而"抛在登记期"只损失那次注册（审查轮 22 P2-2 + §0 第 4 行）。
+            if (frames.size() > FrameRunner.MAX_PERSISTABLE_FRAMES) {
+                throw new IllegalArgumentException("move " + id + ": frame table has " + frames.size()
+                        + " entries, over the " + FrameRunner.MAX_PERSISTABLE_FRAMES
+                        + " a persistence bitmap can hold — split the move or drop frames"
+                        + " (rejected at registration so an over-long table can never reach the tick loop)");
+            }
             for (FrameRunner.Frame<ColossusBossEntity> f : frames) {
                 if (f.from() > duration) {
                     throw new IllegalArgumentException("move " + id + ": frame " + f.from()
