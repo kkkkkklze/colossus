@@ -281,8 +281,10 @@ public abstract class ColossusBossEntity extends Monster {
      *
      * <p>钳必须开在<b>用点</b>而不是钩子里——钩子被覆写就直接绕过钳了。这个数决定的是
      * "每次变更往全体追踪者全量广播多大的一个 tag"，抬到天上就把读侧刚补上的封顶与
-     * {@code FriendlyByteBuf#readNbt} 的 2 MiB accounter 面重新打开（一条 view 约 140 B，
-     * 32 条约 4.5 KiB，是合理量级；一万五千条才会撞上限，那已经不是配置错而是坏档）。
+     * {@code FriendlyByteBuf#readNbt} 的 2 MiB accounter 面重新打开（一条 view 的 wire 约 144 B，
+     * 32 条 wire 约 4.7 KiB；但 2 MiB 那道配额是按 NbtAccounter **计费**的
+     * （每条 compound 48 + 每条目 28+2·名长 + Forge 4 + 新键 36，一条 view ≈ 1.06 kB，是 wire 的 7 倍），
+     * 所以撞线发生在 ≈1980 条而不是"一万五千条"——两个口径必须写清（轮 21 P3-1）。
      */
     private int telegraphCap() {
         int requested = maxActiveTelegraphs();

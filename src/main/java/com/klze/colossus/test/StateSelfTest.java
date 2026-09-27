@@ -673,7 +673,7 @@ public final class StateSelfTest {
         }
         check("particle ledger books each outline's LIFETIME PEAK (rate x min(particle life, emission span))",
                 costIsLifetimePeak);
-        check("the drawn outline closes (slots <= rate x particle life)", coversRing);
+        check("the drawn outline closes (slots <= rate x coverage window)", coversRing);
         check("booked cost is >= the ring's real on-screen population at every tick, including the tail",
                 neverUnderBooks);
         // 粒子寿命长到"一发就超上限"时必须不画，而不是"至少发一个"（轮 19 P2-2 第③条）
@@ -715,30 +715,50 @@ public final class StateSelfTest {
         }
         check("an outline's particles stay booked after it expires, decaying to zero exactly one particle-life later",
                 tailHolds);
-        // 尾段账本的两条性质（轮 20 P1-1 的可跑判据）。原先账本住在 TelegraphClient 里，
-        // 四条门一条都执行不到它——runGameTestServer 是无头服务端，客户端渲染路径不被任何门跑过，
-        // 所以"每次投影重投都多一份尾段账"这个 P1 才能在全绿底下活一整个批次。
+        // 尾段账本的性质（轮 20 P1-1 + 轮 21 P2-3/P2-4 的判据）。原先账本住在 TelegraphClient 里，
+        // 四条门一条都执行不到它——runGameTestServer 是无客户端的服务端，所以"每次投影重投就多
+        // 一份尾段账"那个 P1 能在全绿底下活一整个批次。断言一律用<b>等号</b>与<b>具体条目</b>：
+        // 轮 21 P2-4 指出上一版这里两条都是 `<=`、第三条只重复断条数，把"逐出谁"改成删最老也全绿。
+        final int ceiling = com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL;
         var ledger = new com.klze.colossus.env.TailLedger();
         for (int publish = 0; publish < 5; publish++) {
-            ledger.book(42L, 5, 48, 100L, 200L); // 同一条圈被重投 5 次
+            ledger.noteEmission(42L, 5, 120L);          // 同一条圈被重投 5 次
+            ledger.retire(42L, 48, 100L, 200L);
         }
+        // tailAlive 数的是"过去粒子寿命内发射过、还没散的那些 tick"：发射到 121 止，
+        // 所以 now=140 时还剩 21 个 tick 的份（105 颗），now=170 起颗粒不留
         boolean idempotent = ledger.size() == 1
-                && ledger.bookNow(200L, com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL)
-                        == 5 * 48; // 只有一份账，且等于它生前的峰值
+                && ledger.bookNow(140L, ceiling) == 5 * 21
+                && ledger.bookNow(170L, ceiling) == 0;
         ledger.cancel(42L);
-        idempotent &= ledger.size() == 0; // 又活了：尾段撤掉，账改由 liveCost 记
+        idempotent &= ledger.size() == 0 && ledger.bookNow(200L, ceiling) == 0; // 又活了：撤账
+        var neverEmitted = new com.klze.colossus.env.TailLedger();
+        neverEmitted.retire(7L, 48, 0L, 500L); // 一 tick 都没真发射过 ⇒ 没有余晖可记（不留幽灵账）
+        idempotent &= neverEmitted.size() == 0 && neverEmitted.bookNow(600L, ceiling) == 0;
         var crowded = new com.klze.colossus.env.TailLedger();
-        for (int i = 0; i < 400; i++) crowded.book(i, 5, 48, 0L, 10_000L + i);
-        int bookedNow = crowded.bookNow(5_000L, com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL);
-        boolean capped = crowded.size() <= 64
-                && bookedNow <= com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL / 4;
+        for (int i = 0; i < 400; i++) { crowded.noteEmission(i, 5, 3_000L); crowded.retire(i, 48, 0L, 10_000L + i); }
+        // 观察点取 3_020：还在衰减期内（3_001 + 48 才散完），5_000 就什么都没有了
+        int tailUncapped = crowded.uncappedSum(3_020L);
+        int tailBooked = crowded.bookNow(3_020L, ceiling);
+        boolean capped = tailBooked == ceiling * com.klze.colossus.env.TailLedger.TAIL_BUDGET_PERCENT / 100
+                && tailUncapped > tailBooked; // 第二条把"真实残影"与"账面占用"两个量分开钉
         var evict = new com.klze.colossus.env.TailLedger();
-        evict.book(1L, 5, 48, 0L, 60L); // 合法的到期尾段（马上就散完）
-        for (int i = 2; i <= 80; i++) evict.book(i, 5, 48, 0L, 9_000L + i); // 一堆还在衰减的
-        boolean keepsTheOldestLegit = evict.size() <= 64; // 逐出走 end 最大的，不是最老的
-        check("the tail ledger is idempotent per outline and re-claiming a view cancels its tail", idempotent);
-        check("tail residue is capped to a quarter of the ceiling so live outlines never starve", capped);
-        check("tail eviction drops the slowest-decaying entry, not the oldest one", keepsTheOldestLegit);
+        evict.noteEmission(1L, 5, 59L); evict.retire(1L, 48, 0L, 60L);   // 合法的到期尾段，马上就散完
+        for (int i = 2; i <= 80; i++) { evict.noteEmission(i, 5, 9_500L); evict.retire(i, 48, 0L, 9_000L + i); }
+        boolean dropsSlowest = evict.size() == com.klze.colossus.env.TailLedger.MAX_ENTRIES
+                && evict.contains(1L) && !evict.contains(80L); // 逐出走 end 最大的，不是最老的
+        // 轮 21 P2-3：额度被抢光的那几 tick 里真撒过的粒子不许掉账——峰值存在账本里，
+        // 而尾段窗口收窄到最后一次真发射 + 1（不是名义 end）
+        var starved = new com.klze.colossus.env.TailLedger();
+        starved.noteEmission(9L, 5, 110L);        // 只发射到 110 tick，之后额度被抢光、一帧没画
+        starved.retire(9L, 48, 100L, 200L);       // 名义到期在 200
+        boolean honestWindow = starved.bookNow(140L, ceiling) == 5 * 11 // 100..110 这 11 tick 的份
+                && starved.bookNow(160L, ceiling) == 0; // 111 + 48 = 159 之后颗粒不留
+        check("the tail ledger is idempotent per outline, and a view that never emitted leaves no ghost entry",
+                idempotent);
+        check("tail residue is booked to exactly 25% of the ceiling while the physical residue is larger", capped);
+        check("tail eviction drops the slowest-decaying entry and keeps the nearly-faded one", dropsSlowest);
+        check("the tail window follows the last real emission tick, not the nominal expiry", honestWindow);
         check("outline density is a per-tick-independent band (small ring 8, huge 96, NaN 8)",
                 com.klze.colossus.env.TelegraphBudget.ringSlotCount(0.5) == 8
                         && com.klze.colossus.env.TelegraphBudget.ringSlotCount(2 * Math.PI * 256) == 96

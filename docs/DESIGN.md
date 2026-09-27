@@ -113,9 +113,10 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
   值本身 `DoubleTag:13`=16 / `IntTag:11`=12 / `LongTag:11`=16 / `StringTag:14`=36+UTF ⇒ 一条 view ≈ **1.06 kB**，
   是 wire 的 **7 倍**。
 `FriendlyByteBuf:599` 用 `new NbtAccounter(2097152L)`（`DEFAULT_NBT_QUOTA`）建账号，所以按配额口径
-32 条 ≈ 34.7 kB ⇒ **离 2 MiB 只差 60 倍（1.8 个数量级）**，不是 443 倍；真要把配额撞满需要 ≈3100 条，
-而不是我先前说的"一万五千条"。上限仍然站得住（`HARD_MAX_TELEGRAPHS = 32` 离撞线差两个数量级），
-但**引用哪个口径必须写清**——这正是上一轮批"四舍五入过头"的同一族错误。；默认同时在地上的条数是 `MAX_ACTIVE_TELEGRAPHS = 8`，
+32 条 ≈ 34.7 kB ⇒ **离 2 MiB 只差 60 倍（1.8 个数量级）**，不是 443 倍；真要把配额撞满需要 ≈1980 条（2097152 / 1060）。
+不是我先前先后说过的那两个数（"一万五千条"是 wire 口径、"≈3100 条"是我把除法做错了），
+轮 21 P2-5 抓到处置表写着"已改成 ≈1980"而 §2.4 原文仍是 3100——**这就是本仓第八次"文档说做了、代码里没有"**。上限仍然站得住（`HARD_MAX_TELEGRAPHS = 32` 离撞线差两个数量级），
+但**引用哪个口径必须写清**——这正是上一轮批"四舍五入过头"的同一族错误。默认同时在地上的条数是 `MAX_ACTIVE_TELEGRAPHS = 8`，
 子类按 `maxActiveTelegraphs()` 抬，抬出去的值还要过 `clampTelegraphCap()`（钳到 `1..32`，越界一次性 warn）。
 为什么下界是 1 而不是 0：`0` 会让 `size() >= cap` 恒真 ⇒ 这个 Boss **所有带预警的招一招不落**，
 而"关掉投影却仍落伤害"＝制造没预警的攻击，那比少一格容量严重得多（轮 17 设计偏差第 2 条的裁决，
@@ -130,6 +131,12 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 ## 4. 验证策略
 
 无头优先（用户无法操作客户端）：
+0. **四道门各自跑什么、跑不到什么（轮 21 把这条写进 §4，先前它只在 §7 进度块里）**：
+   `colossusSelfTest` 是纯 JVM（链接不了 `Entity` 的 `<clinit>`，见下），`runGameTestServer` 是<b>无客户端</b>的服务端，
+   `gameTestAudit` 只数 `@GameTest` 声明条数 ⇒ **`client/*` 里的任何运行期行为都不被任何一道门执行**
+   （`grep TelegraphClient gametest/` 0 命中）。所以凡客户端要在乎的性质，先做成 `env/` 下不 import MC
+   的纯类（`TelegraphBudget` / `TailLedger` / `OncePerKey` 都是这么来的），再谈断言；
+   否则"全绿"只代表没人在看。
 1. `gradlew build` 绿——状态机/selector/相位/缩放曲线写 **JUnit-free 纯逻辑自检**（`state`/`move` 包不 import net.minecraft，可被 `dev.klze.colossus.test` 的 main 方法 runner 直接跑）。
    **边界（第二十八批实测钉死）**：`colossusSelfTest` 那个 JVM 里**不能**出现任何要初始化 `Entity` 的断言——
    第一次触碰 `ColossusBossEntity` 的 `<clinit>` 就报 `IllegalArgumentException: Not bootstrapped`
@@ -211,7 +218,9 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
    粒子档的式子在 `env/TelegraphBudget`（纯算术、不 import MC，所以最快那道门能断言它）——
    想要的槽位数 `wantSlots = clamp(2πr·1.5, 8, 96)`；每 tick 生成率 `= clamp(240 / 粒子自身寿命, 1, …)`
    （dust 48t ⇒ 5/tick；spark 71t ⇒ 3/tick）；**记账按"这颗圈的一生峰值 = 率 × min(粒子寿命, 发射窗口)"**（第三十一批再订正：记满"率 × 粒子寿命"会让只发射 11 tick 的速发圈虚高 4 倍多、吃光全局额度），到期后的余晖由尾段账本继续记，
-   合计再受 `MAX_LIVE_GLOBAL = 2000` 这道总闸约束（默认 8 条各 240 刚好容得下）。
+   合计再受 `MAX_LIVE_GLOBAL = 2000` 这道总闸约束（注意 `MAX_LIVE_PER_OUTLINE = 240` 是**不可达**上限：`rate ≤ 240/寿命`、`wantSlots ≤ 96` 联立的真实峰值是 **141（dust）/142（spark）**，轮 21 P3-2 把它改成可复算的形式）。在途圈与到期残影之间还有一道 **25% 子额度**：
+   `TailLedger.bookNow(now, MAX_LIVE_GLOBAL)` 最多只让残影占 `TAIL_BUDGET_PERCENT`＝25%（500），
+   余下 1500 留给还在途的圈——因为"下一发的预警"是安全件、"上一发的残影"是装饰件（轮 20 设计偏差第 1 条）。
    预算铺不满 `wantSlots` 时**把槽位数降下来**而不是留下几段弧——"圈合不上"的正确修法（轮 18 P2-1 后半）。
    三个真实的转折点：密度在 **r ≈ 10.2** 处触到 96 槽上限（`96/(1.5·2π)`）；每点间隔在 **r ≈ 30.6** 处超过 2 格
    （`2·96/(2π)`）；`r = 256` 时间隔 16.75 格（基本读不出来）。线框档是另一条轴：
@@ -969,3 +978,38 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 > 也就是说<b>现在还没有任何运行期持久化</b>——这批只把"恢复时对错的判据"做成了可断言的纯函数。
 > 验证：build（`-Pgecko`）+ 自检 **140/140**（132→140）+ audit **14** + `runGameTestServer`
 > **All 14 required tests passed**（两轮）。
+> 进度（2026-09-26 第三十四批·审查轮 21 处置：**尾段账本自己漏记的两条，以及处置表有三处"说改了没改"**）：
+> ✅ P2-1（我上一批引入）：`surviving` 原先拿整份快照建集合，而重新入库那一支会跳过"快照里已到期"的
+> view ⇒ 那些圈被 `cancel` 而不是 `book`，账面两头都没有（P1 的镜像那一侧）。现在 `surviving` 与
+> "会不会重新入库"用同一个判据（`endGameTime > now`）。
+> ✅ P2-2：`tick()` 改成 ①到期清扫（生成尾段）②余晖入账 ③撒粒子。原先 ② 在 ① 之前 ⇒
+> 到期那一 tick 的余晖<b>当 tick 不在账上</b>，而 `tailAlive` 在 `now == end` 那一 tick 恰等于一生峰值。
+> ✅ P2-3：发射事实（历史峰值率 + 最后一次真发射的 tick）从 `Live.lastRate` 搬进 `TailLedger`
+> （`noteEmission` / `retire`）。`Live` 每次投影换实例都重建、`plan.empty()` 那一支还会把采样值归零，
+> 于是"额度被别人抢光"的那几 tick 里真撒过的粒子永久掉账——而那正是最需要记账的时刻。
+> 尾段窗口同时收窄到 `min(名义 end, 最后一次真发射 + 1)`，虚高与漏记一次修掉；从没真发射过的圈
+> 不留条目（否则是幽灵账）。
+> ✅ P2-4（判据没牙）：三条尾段断言全部换成<b>等号</b>与<b>具体条目</b>——`bookNow == 上限×25%` 且
+> `uncappedSum > bookNow`（把"真实残影"与"账面占用"两个量分开钉）、`contains(1L) && !contains(80L)`
+> （逐出策略第一次真的可断言）、`retire` 后的窗口收窄与归零点。`<=` 那两条按我们自己的规矩是废断言。
+> ✅ P2-5（**本仓第八次"文档说做了、代码里没有"，而且这次是处置表自己**）：`§2.4` 的撞线条数真的
+> 改成 ≈1980（先前那里还写着 ≈3100）；`§6.3` 补上 25% 子额度这条正在生效的配额、并把
+> "默认 8 条各 240 刚好容得下"改成可复算的说法；"四道门跑不到客户端"这条从 §7 挪写进 **§4 验证策略**；
+> `coversRing` 的 check 名改掉（它一直在描述上一版的量）；`ColossusBossEntity` 的"一万五千条"补口径。
+> ✅ P3：`TelegraphView.fromTag` 与账本键共用 `key()`（`Live.mirrorKey` 原先自己写一遍位运算，
+> 漂移一次幂等就静默失效）；`bookNow` 对负 ceiling 取 `max(0, …)`（负数会让"剩余额度"反而放大准入）。
+> ⬜ **本轮没做**（审查者的最小提案，我判断该单独开一批做，而不是继续打补丁）：
+> `env/OutlineFrame`（把 `tick()` 里"投影→账本"整段搬成零 MC 纯类，配四条今天会红的断言：
+> 快照含已到期 view 时残影必须当 tick入账、`beginFrame`→`admit` 不得晚一拍、被抢光额度的圈到期仍记账、
+> `live` 与 `tails` 键集不相交）。**P2-1/P2-2 的"结构性修法"就是它**，我这批只按它的三行版就地堵住。
+> ⬜ 仍未做：`TAIL_BUDGET_PERCENT = 25` 没有推导（该按 `在途条数 × 单圈真实峰值 + 残影预留 ≤ 2000` 反解）；
+> `MAX_LIVE_PER_OUTLINE = 240` **不可达**（真实峰值 141/142，轮 21 推出），我改了文档但没动常量，
+> 因为改常量要连带重算 §6.3 三个转折点——留下一批与 `OutlineFrame` 一起做；
+> `bookNow` 名为查询实为 mutation（协议只写在调用方注释里）；`bossId` 复用时上一任的尾段会被 `cancel`；
+> 额度分配仍按"最近一次投影变化"的插入序。
+> ✅ 变异抽查补做：**MUT-K**（把尾段窗口从 `min(名义 end, 最后真发射+1)` 改回名义 `end`）⇒
+> `the tail window follows the last real emission tick…` 与幂等那条**同时变红**（`2/141`），还原后 141/141；
+> **MUT-J**（逐出条件短路）那次尝试是**编译失败**、不算数——所以"逐出走 end 最大"这条判据
+> 目前仍缺一次成功的变异佐证，下一批用 `contains()` 直接构造一个更朴素的改法再验。
+> 验证：build（`-Pgecko`）+ 自检 **141/141**（140→141：尾段三条拆成四条）+ audit **14** +
+> `runGameTestServer` **All 14 required tests passed**（两轮）。
