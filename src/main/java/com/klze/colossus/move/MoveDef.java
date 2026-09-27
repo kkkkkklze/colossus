@@ -75,6 +75,17 @@ public final class MoveDef {
         this.weightFn = weightFn;
         this.extraCheck = extraCheck;
         this.postAttackInvuln = postAttackInvuln;
+        // 帧表上界必须由<b>带帧表的那个对象</b>自己兜住（轮 23 P2-2）：三条入口里
+        // DSL 的 done() 与 JSON 的 decodeFrames 都在上游拒了，但公共工厂 {@code of()} 没有——
+        // 于是 addon/下游塞一张 65 帧的表照样能一路走到 {@code newRunner() → build()}，
+        // 把异常抛在 <b>AttackState 构造器那一 tick</b>（= 服务端打到一半炸）。
+        // done()/decodeFrames 的早检保留：它们只为了把报错位置挪到离作者更近的地方。
+        if (frames.size() > FrameRunner.MAX_PERSISTABLE_FRAMES) {
+            throw new IllegalArgumentException("move " + id + ": frame table has " + frames.size()
+                    + " entries, over the " + FrameRunner.MAX_PERSISTABLE_FRAMES
+                    + " a persistence bitmap can hold (bits alias mod 64, so entry "
+                    + (FrameRunner.MAX_PERSISTABLE_FRAMES + 1) + " would land on entry 1's bit)");
+        }
         this.frames = frames;
     }
 
@@ -93,6 +104,13 @@ public final class MoveDef {
         return new MoveDef(id, duration, cooldownTicks, minPhase, maxPhase, range, animName,
                 weightFn, extraCheck, notRecent, postAttackInvuln, java.util.List.copyOf(frames));
     }
+
+    /**
+     * 本招式帧表的指纹（{@code (from,to,period)} 序列）。存档续播时把它写进 NBT，
+     * 读回来与新建的 runner 比：<b>不等就说明帧序变了</b>，整份快照作废而不是按位硬播
+     *（轮 23 P2-1：位图按注册序解释每一位，datapack 重载增删一帧就会把旧位图扣到新帧上）。
+     */
+    public long framesDigest() { return FrameRunner.digestOf(this.frames); }
 
     public ResourceLocation id() { return id; }
     /** 招式总时长（逻辑 tick，不含转场窗口）。 */

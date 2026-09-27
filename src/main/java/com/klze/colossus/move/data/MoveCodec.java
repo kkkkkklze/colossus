@@ -368,7 +368,7 @@ public final class MoveCodec {
             throw new MoveDataException("frames", "missing or not an array");
         }
         if (arr.size() > MAX_FRAMES_PER_MOVE) {
-            throw new MoveDataException("frames", "条目数 " + arr.size() + " 超单招上限 " + MAX_FRAMES_PER_MOVE);
+            throw new MoveDataException("frames", "条目数 " + arr.size() + " 超过 " + MAX_FRAMES_PER_MOVE + " 的持久化位图宽度（超界的后果不是少存几位，而是第 " + (MAX_FRAMES_PER_MOVE + 1) + " 帧的触发状态别名写到第 1 帧的位上——见 FrameRunner.MAX_PERSISTABLE_FRAMES）");
         }
         for (int i = 0; i < arr.size(); i++) {
             if (!(arr.get(i) instanceof JsonObject row)) {

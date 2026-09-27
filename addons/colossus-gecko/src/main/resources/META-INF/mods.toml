@@ -1,5 +1,7 @@
 modLoader="javafml"
 loaderVersion="[47,)"
+# license 是本仓**第二份**独立字面量（本体走 gradle.properties 的 mod_license 展开）：
+# 换许可时这里必须一起改，改法见 DESIGN §7"许可裁定落地"那段列的三处触点（轮 23 P3-5-B）。
 license="MIT"
 
 [[mods]]

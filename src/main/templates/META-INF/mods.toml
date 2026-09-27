@@ -10,7 +10,8 @@ modLoader="javafml" #mandatory
 loaderVersion="${loader_version_range}" #mandatory This is typically bumped every Minecraft version by Forge. See download page for lists of versions.
 
 # The license for you mod. This is mandatory metadata and allows for easier comprehension of your redistributive properties.
-# Review your options at https://choosealicense.com/. All rights reserved is the default copyright stance, and is thus the default here.
+# 本仓的许可是 **MIT**（正本 LICENSE，Copyright (c) 2026 klze）；单源在 gradle.properties 的 mod_license。
+# 上面那句"ARR 是默认立场"是 MDK 模板原文，对本仓不成立，2026-09-27 换 MIT 时就地改掉（轮 23 P3-5-A）。
 license="${mod_license}"
 
 # A URL to refer people to when problems occur with this mod

@@ -1181,3 +1181,43 @@ v14 B 节说"TF 1.20.1 在写封印方块前固定跑 `isRestrictionPointValid(d
 
 验证：build（`-Pgecko`）+ 自检 **155/155** + `gameTestAudit: 15 @GameTest declared (floor 15) OK` +
 `runGameTestServer` **All 15 required tests passed**（两轮）。
+
+---
+
+## 第三十七批（审查轮 23 处置）：四条 P2 的共同形态是"搬进纯类只搬了一半"
+
+轮 23 正本 `docs/代码审查-v0.2-round23-findings.md`（429 行，**13 条 = 4×P2 + 9×P3**，
+另有"审过且成立"8 条、"未核实/未覆盖"6+6 条）。它对本批的总判语我接受：
+两处"搬进纯类/钉上界"的动作都只搬了一半——**新判据自身可跑红，但它与被保护事实之间的联结
+仍然只靠代码位置或注释承诺**。逐条处置：
+
+| 编号 | 发现 | 我的核对 | 处置 |
+|---|---|---|---|
+| **P2-1** | 位图按**下标**解释每一位、帧表没有指纹 ⇒ 帧序一变就是"把旧位图扣到别的帧上"；位图半侧改成 `\|\|` 之后这个错位从"双向漂移"变成**单向永久静音**（同一 runner 再恢复多少次都解不开） | 成立（轮 22 P3-4 的同一件事，新表现是它举对的） | ✅ `FrameRunner.digestOf(frames)`（FNV-1a 压 `from/to/period` 序列）+ 构造期算一次存字段；`MoveDef.framesDigest()` 暴露给存档侧；**`resumeFrom` 换成三参并返回拒绝理由**，指纹不符或越界位时**整份作废且一点状态都不动**。新断言钉两头：被拒的快照不得留下痕迹（`advance` 后仍是 `[3,9]`），以及 64 帧满宽表必须放行 `bitmap=-1`（`-1L << 64` 会别名回 `<< 0`，这一档不让路就会误判损坏） |
+| **P2-2** | `resumeRejection` 不收位图 ⇒ 越界位照单全收 | 成立（轮 22 §4.5 写明修法但上批没做） | ✅ 并进上面那道闸 |
+| **P2-3** | 我上批加的 `emitsThisTick` 自检**就是它自己 `!a&&!b&&!c` 的真值表**＝复述实现；把 `noteEmission` 挪到 `return` 之前、或整条删掉那个 if，150 条照样全绿 | **成立，而且是我自己新造的废断言**——上一批我刚在 §4 挨过同样的批评 | ✅ 门改成 `emissionOrZero(culled, budgeted, behind)` **交出要撒的那个对象**：不撒就交 `NONE`（率恒 0）。客户端的 `noteEmission` 的率、撒粒子的循环次数、`liveParticleEstimate` 的增量**读同一个对象的同一批字段**，率的来源只剩一个。断言改成钉返回值（放行 `== budgeted` 且率 >0；三门各自成立时率 0）。**MUT-V 验证**：门不再交 NONE ⇒ 该条变红 |
+| **P2-4** | `retire` 的 `start+1` 下限保住了"记不记"，但**记上的长度**在本地钟落后时塌成 1 tick ⇒ 账面 `rate×1`、真实场上 `rate×min(life, 已发射数)`，低报最多 `life` 倍；而 `retire` 返回 true、测试全绿，**再没有判据能看出它错** | 成立（我上批只修了上一半，还顺手把那个错值当期望钉进了夹具） | ✅ `emissions` 加第三个读数 `[2]=首次发射 tick`；尾段窗口改成 `(first, last+1)`——**两端同为客户端本地钟**，落后量在减法里根本不出现，时基只在这一处出现；上批那道 `start+1` 下限**删掉**（被替代的分支不许留下来当第二套真相）。夹具跟着改诚实：`starved`/`ledger` 两条原先"只记一次发射却按 11/21 tick 期望"，现在逐 tick 记满。新断言取具体数 **55**（旧实现只会交 5）。**MUT-U 验证**：长度退回只按末次发射 ⇒ 四条尾段断言一起红 |
+| **P2-5**（它的 4-A） | 第三条入口：`MoveDef.of()` 是 public 且不校验帧数 ⇒ 65 帧仍然抛在 `AttackState` 构造器那一 tick；而 `MoveDef:49` 的注释自己写着"同一个构造器兜住两条入口才是本仓的口径" | 成立（我上批只在 `done()` 加了闸，`of()` 那条口开着） | ✅ 上界挪进 `MoveDef` 构造器（三条入口全覆盖），`done()`/`decodeFrames` 的早检保留、职责退化成"把报错位置挪到离作者更近"。新断言喂 `MoveDef.of(65 帧)`（今天会红）。**MUT-W 验证**：撤掉构造器闸 ⇒ 该条红 |
+| P3-2 | `-1L` 哨兵与镜像键空间重叠（bossId 为负 ⇒ 真实键就是负数，两处"没找到就 break"会让上界当场变摆设） | 成立（同族：哨兵撞真实数据） | ✅ 两处逐出改成 `found` 标志，不留哨兵 |
+| P3-3 | 纯类 javadoc 说"三道门"，客户端实际至少五道（`hasStyle`、到期 `continue` 都在函数之外），且第四道门运行期可变 | 成立（措辞会把下一个人引向"这就是全部"） | ✅ javadoc 明写"只覆盖粒子档；几何档由 `TelegraphClient.hasStyle` 分流，它不记发射事实是因为它不撒粒子"，并声明那道可变门**刻意不进纯类** |
+| P3-4 | 同一个 tick 里两次读 `getGameTime()`，两个读数在喂同一本账 | 成立（本仓反复踩的"两处时间量各取一次"同族） | ✅ `now` 由 `tick()` 取一次传进 `spawnOutlineParticles(mc, z, now)` |
+| P3-5 | `retire` 的返回值在两个调用点都被**丢弃** ⇒ "低报发生过"这件事至今不可观测 | 成立 | ✅ 账本加 `rejectedBookings()` 计数器（拒入账／从没发射／入账即被逐出三种都计），`clear()` 跟着复位。**⬜ 还没接**到客户端一次性告警或 F3——观测口有了，没人读它 |
+| P3-6（它的 4-B） | 三份文案互相矛盾：`done()` 那句 "can never reach the tick loop" 是**过度承诺**、`MoveCodec` 把 64 说成"单招上限"像策略数、JSON 回执指不到哪一招 | 前两条成立；**第三条不成立**——我读了 `ColossusMoveSetLoader.java:107`，catch 里是 `file + " / " + key + " -> "`，招名在里面（审查者自己在"未核实 4"里挂了这一问，我按读到的撤掉） | ✅ `MoveCodec` 文案改成同因（"超界的后果不是少存几位，而是第 65 帧别名写到第 1 帧的位上"）并引同一常量；`done()` 那句随着 P2-5 落地**变成真话** |
+| 5-A | `src/main/templates/META-INF/mods.toml:13` 还留着 MDK 那句"ARR 是这里的默认立场" | 成立（那是**别人的模板对本仓当前许可的错误陈述**，不属于"历史账不回改"那一类） | ✅ 改成本仓事实 + 指明单源 |
+| 5-B | addon 的 `mods.toml` 的 `license="MIT"` 是第二份独立字面量 | 成立 | ✅ 那一行上方写明"这是第二份、换许可时三处触点见 DESIGN"（addon 没有独立 build 脚本，走根构建的 `gecko` source set，做 expand 需要新铺一条 processResources 管线 ⇒ ⬜ 登记） |
+| 5-C | MIT 要求"副本带声明"，但 `LICENSE` 正文不进 jar，义务事实上落在下游头上 | 成立 | ✅ 两个 jar 都把 `LICENSE` 打进 `META-INF/`；`gradle.properties` 补 `# SPDX-License-Identifier: MIT`。**这一条我第一次改错了地方**：写进了 MDK 那个 `jar { ... }` 块，而它整块在 `*/` 注释里、静默不生效——是回读 jar 条目（`META-INF/LICENSE` 在主 jar 里 False）抓出来的，改挂到 `tasks.named('jar')` 后两个 jar 都验到为 True |
+
+**判据净增**：自检 155 → **157**（指纹两头 + `MoveDef.of` 工厂上界），
+另外三条老断言的**夹具**被改诚实（`starved`/`ledger` 逐 tick 记满、`evict`/`crowded` 的尾段两端都带梯度）。
+变异抽查 **MUT-U / MUT-V / MUT-W / MUT-X** 四个一起上 ⇒ 7 条红（MUT-U 连带把三条老尾段断言一起打红，
+说明它们真的在钉同一个模型），逐个还原后 157/157 全绿。
+
+**⬜ 结转（本批未做，全部有主）**：`env/OutlineFrame` 完整版（P2-3 只做到"率的来源唯一"，
+**"调用顺序"仍然没有判据**，这句不许被读成已收口）· `rejectedBookings()` 的观测面还没接到任何 warn/F3 ·
+镜像键缺 generation（轮 22 P3-8）· 快照第二半接线（现在多了一个必存字段：**第四个键
+`colossus_frames_digest`**，读回时必须与当前招式的 `framesDigest()` 比）· `ArenaSession.entryPoint` 死字段 ·
+`MAX_LIVE_PER_OUTLINE=240` 不可达常量与 §6.3 三个转折点连动重算 · `TAIL_BUDGET_PERCENT` 反解 ·
+`firedBitmap() != 0L` 不钉具体位。
+
+验证：build（`-Pgecko`）+ 自检 **157/157** + `gameTestAudit: 15 @GameTest declared (floor 15) OK` +
+`runGameTestServer` **All 15 required tests passed**（两轮）+ 两个 jar 的 `META-INF/LICENSE` 回读为 True。

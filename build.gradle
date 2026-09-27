@@ -259,6 +259,14 @@ tasks.register('colossusSelfTest', JavaExec) {
 // GameTest/运行期也不引用 test 包。留着它们等于往产线塞一套能往 stdout 打 PASSED 的第二入口。
 tasks.named('jar') {
     exclude 'com/klze/colossus/test/**'
+    // MIT 第二句要求"再分发副本必须带上版权与许可声明"——随 jar 分发的那一份就得在 jar 里面，
+    // 否则这条义务事实上落在下游头上（轮 23 P3-5-C）。mods.toml 那个短字符串不算声明正文。
+    // 注意必须挂在**这一个** jar 配置上：上面 MDK 示例里那个 `jar { ... }` 整块在 /* */ 注释里，
+    // 写进去只会静默不生效（本批第一次就踩了这个，是 jar 内容复验把它抓出来的）。
+    from(rootProject.rootDir) {
+        include 'LICENSE'
+        into 'META-INF'
+    }
 }
 
 // GameTest 声明数下限门（姊妹工程实践：gameTestServer 零测试时打印 "All 0 passed" 并退出 0——
@@ -336,6 +344,10 @@ if (project.hasProperty('gecko')) {
         archiveBaseName = 'colossus-gecko'
         archiveVersion = project.mod_version
         from sourceSets.gecko.output
+        from(rootDir) { // addon 也是本仓的产物，同样带许可正文
+            include 'LICENSE'
+            into 'META-INF'
+        }
         dependsOn tasks.named('compileGeckoJava')
     }
     tasks.named('build') { dependsOn tasks.named('jarColossusGecko') }

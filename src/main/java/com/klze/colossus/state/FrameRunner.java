@@ -69,11 +69,14 @@ public final class FrameRunner<C> {
 
     private final List<Frame<C>> frames;
     private final boolean[] fired;
+    /** 帧表指纹（见 {@link #framesDigest()}）——构造时算一次，续播时整份快照的合法性靠它。 */
+    private final long framesDigest;
     private int lastTick = Integer.MIN_VALUE;
 
     private FrameRunner(List<Frame<C>> frames) {
         this.frames = frames;
         this.fired = new boolean[frames.size()];
+        this.framesDigest = digestOf(frames);
     }
 
     public static <C> Builder<C> builder() { return new Builder<>(); }
@@ -186,19 +189,38 @@ public final class FrameRunner<C> {
     public int lastTick() { return this.lastTick; }
 
     /**
-     * 从一份快照续播。语义只有一条：<b>不补偿、不重放</b>。
+     * 从一份快照续播。语义只有一条：<b>不补偿、不重放</b>，而且<b>整份快照要么被接受要么作废</b>。
      *
-     * <p> {@code tickAt} 是存档里的"招内已跑 tick"，{@code bitmap} 是当时的已触发位图。
-     * 两者可能来自被手改过的存档，所以这里做两件事：
+     * <p> {@code tickAt} 是存档里的"招内已跑 tick"，{@code bitmap} 是当时的已触发位图，
+     * {@code savedDigest} 是存档里那份帧表的指纹（{@link #framesDigest()} 的旧值）。
+     * 三者都可能来自被手改过的存档，所以先做两道<b>不改状态</b>的拒绝：
      * <ul>
-     *   <li><b>窗口已过的帧一律记成"已消费"</b>——那正是 {@code advance} 当时会做的事
-     *       （进入即消费，错过不补）。不这么做的话，一位没置上就会让那一发在续播的
-     *       第一个 tick 上<b>重放一次伤害</b>（存档错一位＝白挨一刀）。</li>
-     *   <li>位图里那些"窗口还没到"的位被设上了，也只是提前记成已消费（宁少不发两遍）。</li>
+     *   <li><b>指纹不符</b>（轮 23 P2-1）：位图按<b>下标</b>解释每一位，而下标的定义来自注册序。
+     *       datapack 重载把一招收窄/插入了一帧，旧位图第 k 位指的就是<b>另一发伤害帧</b>——
+     *       位图半侧改成 {@code ||} 之后，"多放"那一半没了，代价是"少放"那一半变成
+     *       <b>不可恢复的永久静音</b>（同一 runner 上再恢复多少次都解不开）。
+     *       所以这里整份作废、让调用方落 idle，而不是硬播。</li>
+     *   <li><b>越界位</b>（轮 22 §4.5）：{@code 1L << i} 的移位是模 64 的，帧表只有 N 位时
+     *       第 N 位以上的那些位<b>根本不是这张表的</b>；照单全收就等于"一位存档把整招缴械"。
+     *       {@code N == 64} 时必须让路——{@code -1L << 64} 会别名回 {@code -1L << 0}。</li>
      * </ul>
-     * 持续帧两边都不影响：它出不出帧只由 {@code (tick - from) % period} 决定。
+     * 通过两道闸之后才做两件事：窗口已过的帧一律记成"已消费"（那正是 {@code advance} 当时会做的，
+     * 不这么做就会在续播第一个 tick 上重放一次伤害），以及位图里"窗口还没到"的位提前记成已消费
+     * （宁少不发两遍）。持续帧两边都不影响：它出不出帧只由 {@code (tick - from) % period} 决定。
+     *
+     * @return {@code null}＝已续播；否则给出一条能直接进日志的拒绝理由（状态<b>未</b>被改动）
      */
-    public void resumeFrom(int tickAt, long bitmap) {
+    public String resumeFrom(int tickAt, long bitmap, long savedDigest) {
+        if (savedDigest != this.framesDigest) {
+            return "frame table digest " + Long.toHexString(savedDigest)
+                    + " does not match the current move's " + Long.toHexString(this.framesDigest)
+                    + " (the move's frame list changed since the save; refusing to replay it by index)";
+        }
+        int n = frames.size();
+        if (n < MAX_PERSISTABLE_FRAMES && (bitmap & (-1L << n)) != 0L) {
+            return "bitmap " + bitmap + " carries bits above the " + n
+                    + "-entry frame table (a shifted bit aliases onto entry 0; treating the snapshot as corrupt)";
+        }
         this.lastTick = Math.max(tickAt, this.lastTick); // 绝不允许倒退：倒退会重放整段窗口
         for (int i = 0; i < frames.size(); i++) {
             Frame<C> f = frames.get(i);
@@ -213,6 +235,33 @@ public final class FrameRunner<C> {
             // tick 与位图<b>两侧都只许前进</b>；要回退整张表只有一个合法手段：换新 runner。
             this.fired[i] = this.fired[i] || passed || claimed;
         }
+        return null;
+    }
+
+    /**
+     * 帧表指纹：把 {@code (from, to, period)} 序列压成一个 long（FNV-1a 64 位）。
+     *
+     * <p>它<b>不是</b>校验和也不是内容哈希——它只回答一句话："这张表的第 i 位还是不是存档时那一发"。
+     * 因此只取帧序相关的三个量，不含回调引用（回调是不可比对象的 lambda，进了哈希就等于没进）。
+     * 存进 NBT 的就是这一个 long（{@code colossus_frames_digest}），读回来与当前招式的
+     * {@link #framesDigest()} 比；不等就整份快照作废。见 {@link #resumeFrom(int, long, long)}。
+     */
+    public long framesDigest() { return this.framesDigest; }
+
+    /** 按帧序算指纹（同一序列必然同值，与回调无关）。 */
+    public static <C> long digestOf(List<Frame<C>> frames) {
+        long h = 0xcbf29ce484222325L; // FNV-1a 64 位偏移基
+        for (Frame<C> f : frames) {
+            h = mix(h, f.from());
+            h = mix(h, f.to());
+            h = mix(h, f.period());
+        }
+        return h;
+    }
+
+    private static long mix(long h, int v) {
+        h ^= (v & 0xFFFFFFFFL);
+        return h * 0x100000001b3L; // FNV 素数
     }
 
     /**

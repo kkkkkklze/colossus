@@ -206,7 +206,8 @@ public final class TelegraphClient {
         for (Iterator<Map.Entry<Long, Live>> sweep = ZONES.entrySet().iterator(); sweep.hasNext(); ) {
             Live done = sweep.next().getValue();
             if (done.endGameTime > now) continue;
-            TAILS.retire(done.mirrorKey, done.particleLife, done.startGameTime, done.endGameTime);
+            // 尾段窗口由账本自己记的发射事实决定（轮 23 P2-4），这里不再喂服务端时基的 start/end
+            TAILS.retire(done.mirrorKey, done.particleLife);
             sweep.remove();
             version++;
         }
@@ -227,7 +228,9 @@ public final class TelegraphClient {
             // 本地钟落后判据已搬进 spawnOutlineParticles 的三道门之一（轮 22 P2-7）：
             // 原先这里是 `if (clockTooFarBehind) continue;`，于是"落后多少才不画"和
             // "记不记这条圈的发射事实"之间的关系<b>没有任何断言看着</b>——四条门不执行 client/*。
-            if (!hasStyle(z.visual)) spawnOutlineParticles(mc, z); // 几何档接管时不双份表现
+            // 而 `now` <b>由调用方传进来</b>（轮 23 P3-7）：原先这里读一次、函数里再读一次，
+            // 记账的观察点与衰减的读数就不是同一个值——同一 tick 内两次取钟是本仓反复踩的同族。
+            if (!hasStyle(z.visual)) spawnOutlineParticles(mc, z, now); // 几何档接管时不双份表现
         }
     }
 
@@ -248,7 +251,7 @@ public final class TelegraphClient {
             Live z = e.getValue();
             if (z.ownerBossId != bossId) continue;
             if (!surviving.contains(z.viewId)) {
-                TAILS.retire(e.getKey(), z.particleLife, z.startGameTime, z.endGameTime);
+                TAILS.retire(e.getKey(), z.particleLife); // 窗口只认账本自己记的发射事实（轮 23 P2-4）
             } else {
                 TAILS.cancel(e.getKey()); // 还在途：账由下面那份 liveCost 记（双份＝轮 20 P1 的镜像）
             }
@@ -367,49 +370,42 @@ public final class TelegraphClient {
             new com.klze.colossus.env.TailLedger();
 
     /** 粒子档：沿轮廓撒一圈。预算式子全在 {@link com.klze.colossus.env.TelegraphBudget}。 */
-    private static void spawnOutlineParticles(Minecraft mc, Live z) {
-        // 三道门收成一个纯判据（轮 22 P2-7）：原先它们只是三个 early-return 的<u>相对位置</u>，
-        // 而"记不记发射事实"完全取决于这个位置——把下面 noteEmission 挪到距离剔除之前、
-        // 或新增一条落在它之后的 early-return，141 条自检会全绿（四条门不执行 client/*）。
-        // 现在"三门任一成立 ⇒ 不撒 ⇒ 也不记"住在 TelegraphBudget 里、由自检钉住，这里只负责喂三个条件。
+    private static void spawnOutlineParticles(Minecraft mc, Live z, long now) {
         // 按到圆环最近点算，不是到圈心（轮 16 P2-2）：到圈心的话，玩家站在大圈的边缘
         // ——最需要看见它的人——反而整圈一个粒子都不撒，而这道闸恰恰是为了替代
         // vanilla 那条"逐粒子对相机算"的闸（LevelRenderer:2511）而加的，不能比它更严。
+        // !(d <= LIMIT) 而不是 d > LIMIT：后者对 NaN 判 false ⇒ fail-open（轮 17 P3-5）。
+        // 半径/圆心那侧在 TelegraphZone 构造器就被钳成有限值了，所以这一道是第二层而不是唯一一层。
         boolean culledByDistance = mc.player != null
                 && !(nearOutlineDistSq(mc.player, z) <= PARTICLE_CULL_DIST_SQ);
-        long now = mc.level.getGameTime();
-        // <b>本地钟落后超过一整个寿命</b>才不画（轮 16 P3-7 定的措辞，轮 22 P2-7 把它从 tick() 里的
-        // 一个 `continue` 搬成这里的一道门）：新 ClientLevel 的 gameTime 起点是 0
-        // （ClientLevelData 构造器不设该字段，靠 tickTime 自增），只有 respawn 与 SetTime 被 netty
-        // 拆到不同批时才会看到那种量级的错位。代价与收益都写清：正常补包晚 1~3 tick 不会误伤
-        // （span 最小 11）；反过来单程延迟若真超过一整个寿命（约 550ms 起，对最短的那批圈），
-        // 这里会压掉开头几 tick——宁压不假。
+        // <b>本地钟落后超过一整个寿命</b>才不画（轮 16 P3-7）：新 ClientLevel 的 gameTime 起点是 0，
+        // 登记时刻来自服务端 ⇒ 换维度/重生的头几 tick 可能"钟还没对上"；正常补包晚 1~3 tick 不误伤。
         boolean clockBehind = com.klze.colossus.env.TelegraphBudget.clockTooFarBehind(
                 z.startGameTime, z.endGameTime, now);
         // 预算只吃<b>每发常量</b>（周长、粒子寿命、这一发的发射窗口），不吃"还剩几 tick"：
         // 成本＝这颗圈<b>一生里最多同时</b>占的粒子数＝率 × min(粒子寿命, 发射窗口)。
-        // 轮 19 用"剩余时间"是低报（数的是还要撒几个），轮 20 发现记满粒子寿命是高报
-        // （warn=0 的圈只发射 11 tick，按 48 记账等于虚报 4 倍多、白占全局额度）——两头都错过。
-        var plan = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * z.radiusXZ,
+        var budgeted = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * z.radiusXZ,
                 z.particleLife, z.startGameTime, z.endGameTime,
                 com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL - liveParticleEstimate);
-        // 半径/圆心那侧在 TelegraphZone 构造器就被钳成有限值了，所以这一道是第二层而不是唯一一层——
-        // 说清免得下游以为"到这里坐标一定正常"：Live 也可由第三方直接构造，框架不依赖那个假设。
-        if (!com.klze.colossus.env.TelegraphBudget.emitsThisTick(culledByDistance, plan.empty(), clockBehind)) {
-            return; // 太远 / 额度已被前面的圈用完（变稀、暂不画，而不是把帧率换掉）/ 钟还没对上
-        }
-        // "真发射到什么程度"记在账本里而不是记在 Live 上（轮 21 P2-3）：Live 每次投影换实例都会重建，
-        // 挂在它上面的采样值还会在 plan.empty() 那一支被显式归零——于是"额度被别人抢光"的那些 tick
-        // 里真撒过的粒子永久掉账，而那恰恰是最需要记账的时刻。
-        TAILS.noteEmission(z.mirrorKey, plan.ratePerTick(), now);
-        liveParticleEstimate += plan.liveCost(); // 记账单位=一生峰值（率 × min(粒子寿命, 发射窗口)）
+        // <b>三道门交出"要撒的那个对象"，不是交出布尔</b>（轮 23 P3-1/轮 22 P2-7 的收口）：
+        // 上一版门返回布尔、调用方再自己去读 plan.ratePerTick() 记账、自己再拿同一个率撒粒子，
+        // 于是"记的账"与"撒的粒子"之间只靠代码位置联结——把 noteEmission 挪到 return 之前、
+        // 或整条删掉那个 if，自检那条真值表照旧全绿（它只是 !a&&!b&&!c 的复述）。
+        // 现在 emit 是唯一来源：noteEmission 的率、下面循环的次数、liveParticleEstimate 的增量
+        // 全读同一个对象的同一批字段，门说不撒就交 NONE（率 0）。
+        // 注意这仍然<b>没有</b>把"调用顺序"变成可断言的东西——那一半要等 env/OutlineFrame。
+        var emit = com.klze.colossus.env.TelegraphBudget.emissionOrZero(culledByDistance, budgeted, clockBehind);
+        if (emit.empty()) return; // 太远 / 额度已被前面的圈用完（变稀、暂不画）/ 钟还没对上
+        // "真发射到什么程度"记在账本里而不是记在 Live 上（轮 21 P2-3）：Live 每次投影换实例都会重建。
+        TAILS.noteEmission(z.mirrorKey, emit.ratePerTick(), now);
+        liveParticleEstimate += emit.liveCost(); // 记账单位=一生峰值（率 × min(粒子寿命, 发射窗口)）
         RandomSource r = mc.level.getRandom();
         ParticleOptions p = z.cachedParticle != null ? z.cachedParticle : (z.cachedParticle = particleFor(z));
         // 槽位随 tick 轮转：每 tick 只补 rate 个角位，靠轮转铺满整圈，而不是每 tick 重画同一批。
-        long firstSlot = Math.floorMod((now - z.startGameTime) * plan.ratePerTick(), (long) plan.slots());
-        for (int k = 0; k < plan.ratePerTick(); k++) {
-            double slot = (firstSlot + k) % plan.slots();
-            double angle = (slot + r.nextDouble() * 0.5) / plan.slots() * Math.PI * 2;
+        long firstSlot = Math.floorMod((now - z.startGameTime) * emit.ratePerTick(), (long) emit.slots());
+        for (int k = 0; k < emit.ratePerTick(); k++) {
+            double slot = (firstSlot + k) % emit.slots();
+            double angle = (slot + r.nextDouble() * 0.5) / emit.slots() * Math.PI * 2;
             // 必须是带 boolean 的那个重载（轮 14 P1-1，我上一批修的其实是半条）：
             // 7 参形态在 1.20.1 是 ClientLevel.java:597-598 -> levelRenderer.addParticle(p, false, true, ...)，
             // 第一个实参 force 被写死成 false ⇒ LevelRenderer.java:2509 的短路走不到，

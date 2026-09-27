@@ -419,7 +419,7 @@ public final class StateSelfTest {
         var restored = FrameRunner.<List<Integer>>builder()
                 .between(2, 10, (c, tick) -> c.add(tick))
                 .build();
-        restored.resumeFrom(5, 0L);
+        restored.resumeFrom(5, 0L, restored.framesDigest());
         for (int t = 6; t <= 12; t++) restored.advance(hit, t);
         check("resume never replays a window whose start has already passed, even if the bitmap lost its bit",
                 hit.equals(List.of(2)) && restored.lastTick() == 12);
@@ -430,7 +430,7 @@ public final class StateSelfTest {
                 .between(2, 4, (c, tick) -> c.add(tick))
                 .between(8, 9, (c, tick) -> c.add(tick))
                 .build();
-        r2.resumeFrom(5, 0b11L); // 第二帧（i=1）窗口在 8，但位图说它已触发
+        r2.resumeFrom(5, 0b11L, r2.framesDigest()); // 第二帧（i=1）窗口在 8，但位图说它已触发
         for (int t = 6; t <= 12; t++) r2.advance(early, t);
         check("a bit set for a frame whose window has not arrived suppresses that frame (never double-fire)",
                 early.isEmpty());
@@ -440,7 +440,7 @@ public final class StateSelfTest {
         var r3 = FrameRunner.<List<Integer>>builder()
                 .repeating(1, 12, 3, (c, tick) -> c.add(tick))
                 .build();
-        r3.resumeFrom(4, 0L);
+        r3.resumeFrom(4, 0L, r3.framesDigest());
         for (int t = 5; t <= 12; t++) r3.advance(rep2, t);
         check("repeating frames keep their own period after resume (1,4,7,10 minus what already passed)",
                 rep2.equals(List.of(7, 10)));
@@ -454,7 +454,7 @@ public final class StateSelfTest {
         List<Integer> s2 = new ArrayList<>();
         var b1 = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).at(9, (c, tk) -> c.add(tk)).build();
         var b2 = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).at(9, (c, tk) -> c.add(tk)).build();
-        b1.resumeFrom(at, bits); b2.resumeFrom(at, bits);
+        b1.resumeFrom(at, bits, b1.framesDigest()); b2.resumeFrom(at, bits, b2.framesDigest());
         for (int t = 5; t <= 12; t++) { b1.advance(s1, t); b2.advance(s2, t); }
         check("the same snapshot restored twice yields the identical trigger sequence (deterministic)",
                 s1.equals(s2) && s1.equals(List.of(9)));
@@ -493,7 +493,7 @@ public final class StateSelfTest {
         for (int t = 1; t <= 21; t++) armed.advance(armedHits, t);
         boolean replayed = false;
         if (armedHits.equals(List.of(2, 20))) {         // 前置条件必须真成立，否则这条桩什么都没测
-            armed.resumeFrom(5, 0L);                    // 更旧的快照 + 全 0 位图
+            armed.resumeFrom(5, 0L, armed.framesDigest());                    // 更旧的快照 + 全 0 位图
             List<Integer> after = new ArrayList<>();
             for (int t = 22; t <= 25; t++) armed.advance(after, t);
             replayed = after.isEmpty();                 // 20 号那帧不许再触发一次
@@ -502,8 +502,8 @@ public final class StateSelfTest {
                 replayed);
         // 同一份快照恢复两次也必须落在同一个状态（幂等，覆盖语义下第二次会改写第一位的状态）
         var twiceA = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).build();
-        twiceA.resumeFrom(1, 0L);
-        twiceA.resumeFrom(1, 0L);
+        twiceA.resumeFrom(1, 0L, twiceA.framesDigest());
+        twiceA.resumeFrom(1, 0L, twiceA.framesDigest());
         List<Integer> twiceHits = new ArrayList<>();
         for (int t = 2; t <= 6; t++) twiceA.advance(twiceHits, t);
         check("resumeFrom is idempotent: applying the same snapshot twice still fires the pending frame once",
@@ -535,6 +535,45 @@ public final class StateSelfTest {
         }
         check("the frame-table bound is rejected at DSL registration, not when the move is executed mid-fight",
                 registerRejected && registerFits);
+
+        // 轮 23 P2-1 / 轮 22 §4.5：续播前先验两件事——**指纹对不对**、**位图有没有越界位**。
+        // 位图按注册序的第 i 位解释，所以"帧序变了"就是"扣到别人身上"；而 || 语义一旦被越界位
+        // 骗到，那一发在整个窗口内一次都不触发，且**再恢复多少次都解不开**（覆盖式至少还能被
+        // 后一份正常快照纠正）。两种都必须整份作废、状态一点不动。
+        var dig = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).at(9, (c, tk) -> c.add(tk)).build();
+        String digestReason = dig.resumeFrom(0, 0L, dig.framesDigest() ^ 0x55L);
+        List<Integer> afterRefusal = new ArrayList<>();
+        for (int t = 1; t <= 10; t++) dig.advance(afterRefusal, t);
+        boolean digestRefused = digestReason != null && digestReason.contains("digest")
+                && afterRefusal.equals(List.of(3, 9)); // 被拒的快照不得留下任何痕迹
+        // 越界位：这张表只有 2 帧，第 2 位以上不属于它。bitmap=-1（整招缴械）必须被认成损坏。
+        var wide = FrameRunner.<List<Integer>>builder().at(2, (c, tk) -> c.add(tk)).build();
+        String bitsReason = wide.resumeFrom(0, -1L, wide.framesDigest());
+        boolean bitsRefused = bitsReason != null && wide.firedBitmap() == 0L;
+        // 64 帧的表没有"上面那些位"可言（-1L << 64 会别名回 -1L << 0），这一档必须让路，
+        // 否则合法的满宽度位图会被误判成损坏——边界两头都要钉。
+        var full = FrameRunner.builder();
+        for (int i = 1; i <= 64; i++) full.at(i, (c, tk) -> { });
+        var fullRunner = full.build();
+        boolean fullTableAcceptsAllBits = fullRunner.resumeFrom(0, -1L, fullRunner.framesDigest()) == null;
+        check("a snapshot whose frame-table digest differs is refused outright (no silent permanent mute)",
+                digestRefused && bitsRefused && fullTableAcceptsAllBits);
+        // 轮 23 P2-2：第三条入口（公共工厂 MoveDef.of）也必须被带帧表的对象自己兜住——
+        // DSL 的 done() 与 JSON 的 decodeFrames 都拒了，唯独 of() 没有，于是 addon 塞 65 帧
+        // 会一路走到 newRunner() 把异常抛在出招那一 tick。
+        boolean factoryRejected = false;
+        try {
+            var many = new java.util.ArrayList<FrameRunner.Frame<com.klze.colossus.entity.ColossusBossEntity>>();
+            for (int i = 1; i <= 65; i++) {
+                many.add(new FrameRunner.Frame<>(i, i, (boss, tk) -> { }));
+            }
+            com.klze.colossus.move.MoveDef.of(new net.minecraft.resources.ResourceLocation("colossus", "wide"),
+                    70, 0, 0, 1, 8.0f, "anim", ctx -> 1, ctx -> true, 0, 0, many);
+        } catch (IllegalArgumentException expected) {
+            factoryRejected = true;
+        }
+        check("MoveDef's own constructor rejects an over-wide frame table (the third public entry point)",
+                factoryRejected);
 
         check("resume rejection: a stale or nonsense timeline is refused with a reason",
                 FrameRunner.resumeRejection(50, 20, 0) != null
@@ -852,25 +891,31 @@ public final class StateSelfTest {
         final int ceiling = com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL;
         var ledger = new com.klze.colossus.env.TailLedger();
         for (int publish = 0; publish < 5; publish++) {
-            ledger.noteEmission(42L, 5, 120L);          // 同一条圈被重投 5 次
-            ledger.retire(42L, 48, 100L, 200L);
+            for (long t = 100L; t <= 120L; t++) ledger.noteEmission(42L, 5, t); // 真发射 21 个 tick
+            ledger.retire(42L, 48);                                            // 同一条圈被重投 5 次
         }
-        // tailAlive 数的是"过去粒子寿命内发射过、还没散的那些 tick"：发射到 121 止，
-        // 所以 now=140 时还剩 21 个 tick 的份（105 颗），now=170 起颗粒不留
+        // tailAlive 数的是"过去粒子寿命内发射过、还没散的那些 tick"：发射到 120 止（窗口 [100,121)），
+        // 所以 now=140 时还剩 21 个 tick 的份（105 颗），now=169 起颗粒不留
         boolean idempotent = ledger.size() == 1
                 && ledger.bookNow(140L, ceiling) == 5 * 21
-                && ledger.bookNow(170L, ceiling) == 0;
+                && ledger.bookNow(169L, ceiling) == 0;
         ledger.cancel(42L);
         idempotent &= ledger.size() == 0 && ledger.bookNow(200L, ceiling) == 0; // 又活了：撤账
         var neverEmitted = new com.klze.colossus.env.TailLedger();
-        neverEmitted.retire(7L, 48, 0L, 500L); // 一 tick 都没真发射过 ⇒ 没有余晖可记（不留幽灵账）
+        neverEmitted.retire(7L, 48); // 一 tick 都没真发射过 ⇒ 没有余晖可记（不留幽灵账）
         idempotent &= neverEmitted.size() == 0 && neverEmitted.bookNow(600L, ceiling) == 0;
+        // 轮 23 P3-5：低报必须<b>至少可观测</b>。retire 的返回值原先在两个调用点都被丢弃，
+        // 于是"根本没记上"与"记上又被逐出"这两件事只有自检知道。计数器是客户端一次性告警的口子。
+        idempotent &= neverEmitted.rejectedBookings() == 1;
         var crowded = new com.klze.colossus.env.TailLedger();
-        // 发射 tick 也做成有梯度的（轮 22 §4.2）：原先 400 条都在 3_000 发射，被 `retire` 的
-        // "窗口收窄到最后一次真发射 + 1" 一并塌成同一条 end ⇒ 这 400 次溢出逐的其实是<b>插入序最老</b>，
-        // 而注释与提交信息都还当它在测"按 end 逐出"。夹具退化同样是判据失效。
-        for (int i = 0; i < 400; i++) { crowded.noteEmission(i, 5, 3_000L + i); crowded.retire(i, 48, 0L, 10_000L + i); }
-        // 观察点取 3_020：还在衰减期内（最迟 3_400 + 48 才散完），5_000 起什么都没有了
+        // 每条圈的发射跨度都做有梯度的（轮 22 §4.2 + 轮 23 的新模型）：尾段窗口现在直接是
+        // {@code [首次发射 tick, 末次发射 tick + 1)}，所以两端都不同 ⇒ "按 end 逐出"真的可测。
+        for (int i = 0; i < 400; i++) {
+            crowded.noteEmission(i, 5, 2_981L + i); // 首次
+            crowded.noteEmission(i, 5, 3_000L + i); // 末次（跨度 20 tick）
+            crowded.retire(i, 48);
+        }
+        // 观察点取 3_020：还在衰减期内（最迟 3_020 + 48 才散完），5_000 起什么都没有了
         int tailUncapped = crowded.uncappedSum(3_020L);
         // <b>写数字，不复述式子</b>（轮 22 §4.3）：原先左半边是 `ceiling * TAIL_BUDGET_PERCENT / 100`，
         // 与被测类 `TailLedger.bookNow` 里同一个式子、同一个常量——把 25 改成 90 断言照样全绿，
@@ -879,34 +924,37 @@ public final class StateSelfTest {
         boolean capped = tailBooked == 500
                 && com.klze.colossus.env.TailLedger.TAIL_BUDGET_PERCENT <= 25
                 && tailUncapped > tailBooked; // 右半边把"真实残影"与"账面占用"两个量分开钉（这条本来有效）
-        // 逐出策略的判据必须能把三种实现分开（轮 22 §4.1，也是本仓一直缺一次成功变异的那条）：
+        // 逐出策略的判据必须能把<b>三种实现</b>分开（轮 22 §4.1，也是本仓一直缺一次成功变异的那条）：
         // "逐 end 最大者" / "逐最新插入者" / "逐插入序最老者"。旧夹具里 80 号<b>同时</b>是
         // "end 最大"和"最新插入"，所以改成"新来的直接不入账"也全绿。
-        // 新夹具：先填满 64 条（end 201..264），再塞一条 end=205 的<b>最新</b>条目——
-        // 逐 end 最大 ⇒ 掉 64 号、留 999 号与 1 号；逐最新 ⇒ 掉 999；逐最老 ⇒ 掉 1 号。
+        // 新夹具：先填满 64 条（end 202..265），再塞一条<b>最新但 end 最小</b>的——
+        // 逐 end 最大 ⇒ 掉 64 号、留 999 与 1 号；逐最新 ⇒ 掉 999；逐最老 ⇒ 掉 1 号。
         var evict = new com.klze.colossus.env.TailLedger();
         for (int i = 1; i <= com.klze.colossus.env.TailLedger.MAX_ENTRIES; i++) {
+            evict.noteEmission(i, 5, 200L);
             evict.noteEmission(i, 5, 200L + i);
-            evict.retire(i, 48, 200L, 200L + i);
+            evict.retire(i, 48);
         }
         evict.noteEmission(999L, 5, 205L);
-        boolean evictedYoungest = evict.retire(999L, 48, 200L, 205L);
+        boolean evictedYoungest = evict.retire(999L, 48);
         boolean dropsSlowest = evictedYoungest
                 && evict.size() == com.klze.colossus.env.TailLedger.MAX_ENTRIES
                 && evict.contains(999L) && evict.contains(1L) && !evict.contains(64L);
-        // 轮 22 P2-4：本地钟落后于发射起点时（换维度/重生），`em[1]+1` 会 <= start，
-        // 旧实现在这里把<b>已发生的发射整条拒记</b>，而发射事实已被上一行消费 ⇒ 永久低报。
-        // 现在窗口下限钉在 start+1："要不要记"只由"从没发射过"那一处判。
+        // 轮 23 P2-4（轮 22 P2-4 的另一半）：本地钟落后时，尾段<b>长度</b>不能塌成 1 tick。
+        // 旧写法拿服务端时基的 start 去减客户端时基的 lastEmit，落后 L tick 就交 rate×1，
+        // 而真实场上站着 rate×min(寿命, 已发射 tick 数)——低报最多 life 倍，正是全局闸唯一在防的方向。
+        // 现在窗口两端都是账本自己的客户端读数（[890, 901) ⇒ 21 tick 里已发射的 11 个），
+        // 落后量在减法里根本不出现。判据取 55 这个具体数：旧实现这里只会交 5。
         var lagged = new com.klze.colossus.env.TailLedger();
-        lagged.noteEmission(3L, 5, 900L);          // 最后一次真发射在服务端登记时刻之前
-        boolean lagBooked = lagged.retire(3L, 48, 1000L, 1210L);
-        check("an outline retired while the local clock still lags its start still books its emission",
-                lagBooked && lagged.size() == 1 && lagged.bookNow(1000L, ceiling) == 5);
+        for (long t = 890L; t <= 900L; t++) lagged.noteEmission(3L, 5, t); // 发射 11 个 tick
+        boolean lagBooked = lagged.retire(3L, 48);
+        check("the tail's length comes from the ledger's own emission facts, not from subtracting two clocks",
+                lagBooked && lagged.size() == 1 && lagged.bookNow(901L, ceiling) == 5 * 11);
         // 轮 21 P2-3：额度被抢光的那几 tick 里真撒过的粒子不许掉账——峰值存在账本里，
         // 而尾段窗口收窄到最后一次真发射 + 1（不是名义 end）
         var starved = new com.klze.colossus.env.TailLedger();
-        starved.noteEmission(9L, 5, 110L);        // 只发射到 110 tick，之后额度被抢光、一帧没画
-        starved.retire(9L, 48, 100L, 200L);       // 名义到期在 200
+        for (long t = 100L; t <= 110L; t++) starved.noteEmission(9L, 5, t); // 发射到 110 止，之后额度被抢光
+        starved.retire(9L, 48);                   // 名义到期在 200：窗口只认发射事实，不认它
         boolean honestWindow = starved.bookNow(140L, ceiling) == 5 * 11 // 100..110 这 11 tick 的份
                 && starved.bookNow(160L, ceiling) == 0; // 111 + 48 = 159 之后颗粒不留
         check("the tail ledger is idempotent per outline, and a view that never emitted leaves no ghost entry",
@@ -915,8 +963,8 @@ public final class StateSelfTest {
         // 必须交出 false——发射事实已被第一次消费掉；"又活了"的撤销只由 cancel 在重新入库那一点做。
         var twice = new com.klze.colossus.env.TailLedger();
         twice.noteEmission(5L, 4, 120L);
-        boolean firstRetire = twice.retire(5L, 48, 100L, 130L);
-        boolean secondRetire = twice.retire(5L, 48, 100L, 130L);
+        boolean firstRetire = twice.retire(5L, 48);
+        boolean secondRetire = twice.retire(5L, 48);
         check("retire books a tail exactly once per outline and says so (generation, not cancellation)",
                 firstRetire && !secondRetire && twice.size() == 1);
         // 发射事实表溢出时，逐出必须挑<b>停发最久</b>的那条：插入序最老的完全可能仍在长预警里画，
@@ -929,9 +977,9 @@ public final class StateSelfTest {
             overflow.noteEmission(i, 5, 5_000L - i);            // key 0 最新（5_000），key 127 最老（4_873）
         }
         overflow.noteEmission(999L, 5, 9_000L);                  // 挤出一条
-        boolean freshKept = overflow.retire(999L, 48, 8_990L, 9_001L);
-        boolean newestSurvived = overflow.retire(0L, 48, 4_990L, 5_001L);   // 插入最老但仍在发射 ⇒ 该留
-        boolean oldestEvicted = !overflow.retire(127L, 48, 4_870L, 4_873L); // 停发最久 ⇒ 该丢
+        boolean freshKept = overflow.retire(999L, 48);
+        boolean newestSurvived = overflow.retire(0L, 48);                    // 插入最老但最新发射 ⇒ 该留
+        boolean oldestEvicted = !overflow.retire(127L, 48);                   // 停发最久 ⇒ 该丢
         check("emission overflow evicts the longest-silent outline, not the oldest-inserted one",
                 freshKept && newestSurvived && oldestEvicted
                         // 被丢那条<b>本来就归零</b>——这才是"丢它不撒谎"的依据，必须一起钉住
@@ -948,20 +996,30 @@ public final class StateSelfTest {
         // 轮 22 P2-7：客户端"这一 tick 到底撒不撒"的三道门原先只是三个 early-return 的<b>相对位置</b>，
         // 而发射事实记不记完全取决于那个位置——四条门不执行 client/*，所以挪错顺序可以全绿。
         // 判据搬进 TelegraphBudget 之后，这里第一次真的能把它跑红（缺门方向＝低报＝危险方向）。
-        boolean gateTable = com.klze.colossus.env.TelegraphBudget.emitsThisTick(false, false, false)
-                && !com.klze.colossus.env.TelegraphBudget.emitsThisTick(true, false, false)   // 距离剔除
-                && !com.klze.colossus.env.TelegraphBudget.emitsThisTick(false, true, false)   // 额度为空
-                && !com.klze.colossus.env.TelegraphBudget.emitsThisTick(false, false, true)   // 钟没对上
-                && !com.klze.colossus.env.TelegraphBudget.emitsThisTick(true, true, true);
-        // 落后判据本身：阈值是"一整个寿命（span）"，边界必须双侧钉住——早一 tick 画、晚一 tick 不画，
+        // 轮 23 P3-1：门必须<b>交出要撒的那个对象</b>，而不是交出布尔再让调用方自己去读率。
+        // 上一版那条 gateTable 逐字就是 !a&&!b&&!c 的真值表——本仓定义的废断言：把 noteEmission
+        // 挪到那道 return 之前、或整条删掉那个 if，150 条照样全绿。现在钉的是<b>有内容的返回值</b>：
+        // 放行时原样交回预算（率/槽位/成本三个数都还在），任一条件成立时交 NONE（率恒 0）。
+        var budgeted = com.klze.colossus.env.TelegraphBudget.plan(2 * Math.PI * 6.0,
+                com.klze.colossus.env.TelegraphBudget.DUST_LIVE_TICKS, 0L, 1210L,
+                com.klze.colossus.env.TelegraphBudget.MAX_LIVE_GLOBAL);
+        boolean gateReturnsPayload =
+                com.klze.colossus.env.TelegraphBudget.emissionOrZero(false, budgeted, false) == budgeted
+                        && budgeted.ratePerTick() > 0 // 前置：预算本身非空，否则"交回同一个对象"是空话
+                && com.klze.colossus.env.TelegraphBudget.emissionOrZero(true, budgeted, false).ratePerTick() == 0
+                && com.klze.colossus.env.TelegraphBudget.emissionOrZero(false, budgeted, true).ratePerTick() == 0
+                && com.klze.colossus.env.TelegraphBudget.emissionOrZero(false,
+                        com.klze.colossus.env.TelegraphBudget.Outline.NONE, false).ratePerTick() == 0
+                && com.klze.colossus.env.TelegraphBudget.emissionOrZero(true, budgeted, true).empty();
+        // 落后判据本身：阈值是"一整个发射窗口（span）"，边界必须双侧钉住——早一 tick 画、晚一 tick 不画，
         // 否则"落后多少才不画"又会变成只有注释知道的口径（轮 16 P3-7 当初改措辞就是为了这个）。
         boolean skewEdge = !com.klze.colossus.env.TelegraphBudget.clockTooFarBehind(1_000L, 1_011L, 989L)
                 && com.klze.colossus.env.TelegraphBudget.clockTooFarBehind(1_000L, 1_011L, 988L)
                 // 反向（本地钟<b>超前</b>）永远不该被这道门挡：这道闸只管"落后"，
                 // 挡超前的话就把正常补包也压掉了，而超前那一侧由到期清扫自然收敛
                 && !com.klze.colossus.env.TelegraphBudget.clockTooFarBehind(1_000L, 1_011L, 5_000L);
-        check("the three client emission gates are one pure predicate (any one holds => no emission fact booked)",
-                gateTable && skewEdge);
+        check("the emission gate hands back the payload to book (not a bare boolean the caller re-reads)",
+                gateReturnsPayload && skewEdge);
         check("outline density is a per-tick-independent band (small ring 8, huge 96, NaN 8)",
                 com.klze.colossus.env.TelegraphBudget.ringSlotCount(0.5) == 8
                         && com.klze.colossus.env.TelegraphBudget.ringSlotCount(2 * Math.PI * 256) == 96

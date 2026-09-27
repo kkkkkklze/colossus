@@ -103,21 +103,31 @@ public final class TelegraphBudget {
     }
 
     /**
-     * 这一 tick 这条圈<b>会不会真的往世界里撒粒子</b>——三道门任一成立就不撒，
-     * 于是也<b>不该</b>向 {@link TailLedger} 提交"我发射过"的事实。
+     * 这一 tick 这条圈<b>到底发不发射、发几个</b>——把三道门与<b>要交出去的那个率</b>绑成一次调用。
      *
-     * <p>为什么单独成函数（轮 22 P2-7，{@code OutlineFrame} 的最小可用版）：发射事实的
-     * <b>判据</b>原先只是散在 {@code spawnOutlineParticles} 里三个 early-return 的相对位置上。
-     * 摆放今天是对的，但没有任何纯类断言钉住它——把记账点挪到距离剔除之前、或新加一条落在
-     * 记账点之后的 early-return（少撒了却记满率＝低报；反之＝幽灵账），141 条自检会<b>全绿</b>。
-     * 收成一个纯函数之后，"三门与记账的先后"第一次变成能在最快的门上跑红的东西。
+     * <p>为什么交对象而不是交布尔（审查轮 23 P2-3，这是轮 22 P2-7 真正收口的地方）：
+     * 上一版 {@code emitsThisTick(culled, empty, behind)} 交出一个布尔，调用方随后<b>自己</b>去读
+     * {@code plan.ratePerTick()} 记账、再自己拿同一个率撒粒子。于是"记的账"与"撒的粒子"之间
+     * 仍然只靠<b>代码位置</b>联结——自检那条 {@code gateTable} 逐字就是 {@code !a&&!b&&!c} 的真值表，
+     * 属于本仓定义的废断言（把 {@code noteEmission} 挪到那道 return 之前、或整条删掉那个 if，
+     * 150 条照样全绿）。现在门交出<b>要撒的那个对象</b>：不撒就交 {@link Outline#NONE}（率恒 0），
+     * 于是"记的率"与"循环次数"是同一个字段，一次读取、一处来源。
+     *
+     * <p><b>这仍然没有把"调用顺序"变成可断言的东西</b>——办到那一半需要 {@code env/OutlineFrame}
+     * （把"投影→账本"整段搬进纯类）。这里做到的只是"率的来源唯一"，别把它读成"联结已经有门看着了"。
+     *
+     * <p><b>只覆盖粒子档</b>（轮 23 P3-4）：几何档（{@code ring} 等注册样式）由
+     * {@code TelegraphClient.hasStyle} 在调用点之前分流——它不记发射事实是因为它<b>不撒粒子</b>，
+     * 不是因为被这三道门挡住。别把本函数读成"这条圈这一 tick 有没有被玩家看见"。
      *
      * @param culledByDistance 玩家离圆环太远（含"玩家为 null 时不剔除"的口径）
-     * @param outOfBudget      {@link #plan} 交回 {@link Outline#empty()}（全局额度已被前面的圈用完）
+     * @param plan             {@link #plan} 为本条圈算出的预算（可能已是 {@link Outline#NONE}）
      * @param clockBehind      {@link #clockTooFarBehind}
+     * @return 可以发射就原样交回 {@code plan}，否则交 {@link Outline#NONE}
      */
-    public static boolean emitsThisTick(boolean culledByDistance, boolean outOfBudget, boolean clockBehind) {
-        return !culledByDistance && !outOfBudget && !clockBehind;
+    public static Outline emissionOrZero(boolean culledByDistance, Outline plan, boolean clockBehind) {
+        if (culledByDistance || plan.empty() || clockBehind) return Outline.NONE;
+        return plan;
     }
 
     /**
