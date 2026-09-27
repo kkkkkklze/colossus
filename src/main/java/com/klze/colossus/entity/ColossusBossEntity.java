@@ -1469,7 +1469,11 @@ public abstract class ColossusBossEntity extends Monster {
             if (!arena.isActive() && this.isActivated() && !this.deathPending) {
                 arena.begin(server);
             }
-            if (arena.isActive()) arena.tick(server);
+            // <b>不看 isActive 也要调</b>（第三十六批）：会话结束后还可能有没还回世界的封路块
+            // （那一格当时区块没加载），追偿路径就住在 {@code ArenaSession.tick()} 的开头。
+            // 沿用 {@code if (arena.isActive())} 那道门的话，那条追偿就是<b>永远不会执行的死路</b>——
+            // 而它看起来像是被修好了。代价只是每 tick 一次 isEmpty() 判断。
+            arena.tick(server);
         }
         var squad = this.squad();
         if (!squad.defs().isEmpty()) {

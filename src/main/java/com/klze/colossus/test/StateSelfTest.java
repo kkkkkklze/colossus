@@ -48,6 +48,7 @@ public final class StateSelfTest {
         testProgressLedger();
         MoveJsonSelfTest.run((name, ok) -> check(name, ok));
         testDeferredWorkData();
+        testArenaBounds();
         if (failures > 0) {
             System.out.println("SELFTEST FAILED: " + failures + "/" + checks);
             System.exit(1);
@@ -553,6 +554,68 @@ public final class StateSelfTest {
                         // 求和必须走 long：`99 + 2_000_000_000` 用 int 加会溢出成负数，
                         // 那会把"最越界"的一档判成放行
                         && FrameRunner.resumeRejection(99, 100, 2_000_000_000) != null);
+    }
+
+    /**
+     * 竞技场边界的纯判据（第三十六批，v14 取证来料）。这些性质原先只住在 {@code ArenaSession}
+     * 里——那个类 import MC，四条门里只有 {@code runGameTestServer} 碰得到它，而它需要一个活世界
+     * 加活区块，所以"配一个坏半轴就把玩家每 tick 弹来弹去"这类故障<b>没有任何门能提前看见</b>。
+     */
+    private static void testArenaBounds() {
+        double def = com.klze.colossus.env.ArenaBounds.DEFAULT_RADIUS_XZ;
+        // ①坏半轴一律回默认，且<b>回出来的值必须仍然 >0</b>——这条才是"防弹跳风暴"的真判据：
+        // AABB 的 min>max 会让 contains() 恒假，于是每个 tick 都判越界、每 tick 都传送一次。
+        boolean radiusLegal = true;
+        double[] bad = new double[]{0.0, -5.0, Double.NaN, Double.POSITIVE_INFINITY, 1e9,
+                com.klze.colossus.env.ArenaBounds.MAX_BOUND_RADIUS + 0.5};
+        for (double v : bad) {
+            double got = com.klze.colossus.env.ArenaBounds.radiusOr(v, def);
+            radiusLegal &= got == def;
+        }
+        radiusLegal &= com.klze.colossus.env.ArenaBounds.radiusOr(64.0, def) == 64.0
+                && com.klze.colossus.env.ArenaBounds.radiusOr(
+                        com.klze.colossus.env.ArenaBounds.MAX_BOUND_RADIUS, def)
+                        == com.klze.colossus.env.ArenaBounds.MAX_BOUND_RADIUS; // 边界含
+        check("an unusable arena radius falls back to the default, and the fallback is strictly positive",
+                radiusLegal);
+
+        // ②宽限允许 0（"立刻拉回"是作者的合法意图），提醒间隔至少 1
+        boolean timingDomain = com.klze.colossus.env.ArenaBounds.graceTicksOr(0, 200) == 0
+                && com.klze.colossus.env.ArenaBounds.graceTicksOr(-1, 200) == 200
+                && com.klze.colossus.env.ArenaBounds.graceTicksOr(24_001, 200) == 200
+                && com.klze.colossus.env.ArenaBounds.warnEveryTicksOr(0, 100) == 100
+                && com.klze.colossus.env.ArenaBounds.warnEveryTicksOr(20, 100) == 20;
+        check("grace may be zero but the warn interval must be at least one tick", timingDomain);
+
+        // ③读档坐标三元组的可用性：缺一个键 / 写成字符串 / NaN / 超世界边界，全部判不可用。
+        //    1.20.1 的 getDouble 对类型不对的键回 0，所以"少一个 home_y"会静默把圆心沉到世界底。
+        boolean coordGate = com.klze.colossus.env.ArenaBounds.usableCoordinate(10, 20, 30)
+                && !com.klze.colossus.env.ArenaBounds.usableCoordinate(10, Double.NaN, 30)
+                && !com.klze.colossus.env.ArenaBounds.usableCoordinate(10, Double.POSITIVE_INFINITY, 30)
+                && !com.klze.colossus.env.ArenaBounds.usableCoordinate(
+                        com.klze.colossus.env.ArenaBounds.MAX_CENTER_ABS + 1, 20, 30)
+                && !com.klze.colossus.env.ArenaBounds.usableCoordinate(10, 20, -1e30);
+        check("a save coordinate is usable only when all three axes are finite and inside the world",
+                coordGate);
+
+        // ④封路分类的<b>优先级</b>：区块没加载必须排在"被占用"之前——
+        // 反过来的话，会话就会为了问 canBeReplaced 而去 getBlockState，服务端强制生成缺失区块，
+        // 那道门等于没设（v14 取证里 TF 1.20.1 的七个 Boss 都是先问区块）。
+        boolean sealOrder = com.klze.colossus.env.ArenaBounds.classifySeal(false, false)
+                == com.klze.colossus.env.ArenaBounds.SealOutcome.NO_CHUNK
+                && com.klze.colossus.env.ArenaBounds.classifySeal(false, true)
+                == com.klze.colossus.env.ArenaBounds.SealOutcome.NO_CHUNK
+                && com.klze.colossus.env.ArenaBounds.classifySeal(true, false)
+                == com.klze.colossus.env.ArenaBounds.SealOutcome.OCCUPIED
+                && com.klze.colossus.env.ArenaBounds.classifySeal(true, true)
+                == com.klze.colossus.env.ArenaBounds.SealOutcome.PLACED;
+        check("seal classification asks the chunk before the block (never probes a missing chunk)", sealOrder);
+
+        // ⑤解封：区块没加载 ⇒ 这一格<b>不许当作已恢复</b>（旧写法调过 setBlock 就删账，
+        // 于是方块永久留在世界里、连重试的机会都没了）
+        check("an unrestored slot is reported as not-ready so its snapshot survives for retry",
+                !com.klze.colossus.env.ArenaBounds.worldReady(false)
+                        && com.klze.colossus.env.ArenaBounds.worldReady(true));
     }
 
     private static void testFrameSingleShot() {

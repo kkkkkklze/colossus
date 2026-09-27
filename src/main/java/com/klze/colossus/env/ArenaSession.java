@@ -53,8 +53,23 @@ public final class ArenaSession {
                        int graceTicks, int warnEveryTicks,
                        boolean healOnFail,
                        double boundRadiusXZ, double boundRadiusY) {
+        /**
+         * <b>合法域只有一个地方定义</b>：紧凑构造器把四个可配参数交给 {@link ArenaBounds}。
+         * 不这么做的话，下游写 {@code new Spec(..., -5, -5)} 会让 {@code AABB} 的 min&gt;max，
+         * {@code bounds.contains(...)} 从此恒假——玩家在竞技场里<b>每 tick 被判越界、被反复传送</b>。
+         * 这类"配一个坏数字＝运行期折磨人"的输入必须在登记期回默认值（同 {@code TelegraphZone} 的口径）。
+         */
+        public Spec {
+            graceTicks = ArenaBounds.graceTicksOr(graceTicks, ArenaBounds.DEFAULT_GRACE_TICKS);
+            warnEveryTicks = ArenaBounds.warnEveryTicksOr(warnEveryTicks, ArenaBounds.DEFAULT_WARN_EVERY_TICKS);
+            boundRadiusXZ = ArenaBounds.radiusOr(boundRadiusXZ, ArenaBounds.DEFAULT_RADIUS_XZ);
+            boundRadiusY = ArenaBounds.radiusOr(boundRadiusY, ArenaBounds.DEFAULT_RADIUS_Y);
+        }
+
         public static Spec of(List<Vec3> sealOffsets, Block sealBlock) {
-            return new Spec(sealOffsets, sealBlock, 200, 100, true, 64, 32);
+            return new Spec(sealOffsets, sealBlock, ArenaBounds.DEFAULT_GRACE_TICKS,
+                    ArenaBounds.DEFAULT_WARN_EVERY_TICKS, true,
+                    ArenaBounds.DEFAULT_RADIUS_XZ, ArenaBounds.DEFAULT_RADIUS_Y);
         }
     }
 
@@ -109,7 +124,13 @@ public final class ArenaSession {
      * 落进未加载区块会把人留在空中。
      */
     public void tick(ServerLevel level) {
-        if (!active) return;
+        if (!active) {
+            // 会话结束了但还有没还回去的封路块（那一格当时区块没加载）——**继续追**，
+            // 不然"胜利/团灭那一 tick 正好没加载"就把一堵黑曜石永久留在玩家世界里，
+            // 而且原先是"调过 setBlock 就删账"，连追的机会都没有（第三十六批）。
+            if (!sealSnapshot.isEmpty()) applySeal(level, false);
+            return;
+        }
         var server = level.getServer();
         Vec3 anchor = home == null ? boss.position() : home;
         double rx = spec.boundRadiusXZ(), ry = spec.boundRadiusY();
@@ -160,9 +181,10 @@ public final class ArenaSession {
         double radius = index == 0 ? 0.0 : 1.2 + 0.4 * ((index - 1) % 4);
         BlockPos origin = BlockPos.containing(
                 anchor.x + Math.cos(angle) * radius, anchor.y, anchor.z + Math.sin(angle) * radius);
-        // 先问区块在不在：服务端 getBlockState 会**强制生成**缺失区块，主线程做这件事不是框架该有的形状
+        // 先问区块在不在（与封/解<b>同一条判据</b>，走 ArenaBounds.worldReady——同一个规则不许有两份写法）：
+        // 服务端 getBlockState 会**强制生成**缺失区块，主线程做这件事不是框架该有的形状
         // （落点距 home ≤2.4 格，实践中总是已加载——但这道门值一行——P3-6）
-        if (!level.hasChunkAt(origin)) {
+        if (!ArenaBounds.worldReady(level.hasChunkAt(origin))) {
             return new Vec3(origin.getX() + 0.5, origin.getY() + 1.0, origin.getZ() + 0.5);
         }
         for (int dy = -2; dy <= 3; dy++) {
@@ -207,8 +229,24 @@ public final class ArenaSession {
      * 原先"靠兜底全量还原救回来"的形状等于一条永远走不通的主路径。
      */
     private void applySeal(ServerLevel level, boolean seal) {
+        String who = String.valueOf(boss.getBossId());
         if (!seal) {
             for (var e : new ArrayList<>(sealSnapshot.entrySet())) {
+                // <b>先问区块，再动手</b>（v14 取证 B 节：TF 1.20.1 七个 Boss 在写封印方块前
+                // 固定跑 {@code isRestrictionPointValid(dim) && level().isLoaded(pos)} 双短路；
+                // 而本仓此前<b>一次 isLoaded 都没有</b>）。服务端 {@code setBlock/getBlockState}
+                // 对缺失区块会<b>强制生成</b>，这件事发生在 Boss 的 tick 里。
+                if (!ArenaBounds.worldReady(level.hasChunkAt(e.getKey()))) {
+                    // 没加载就<b>不删账</b>：交给 tick() 开头那条"会话已结束但快照非空"的追偿路径。
+                    // 旧写法是"调过 setBlock 就 remove"，于是一次没加载＝方块永久留在世界里，
+                    // 连重试的机会都被删掉了。
+                    if (OncePerKey.firstTime(who + "|arena-restore")) {
+                        Colossus.LOGGER.warn("arena restore deferred: chunk at {} not loaded yet, "
+                                        + "keeping {} snapshot entr(y) (boss {})",
+                                e.getKey().toShortString(), sealSnapshot.size(), boss.getBossId());
+                    }
+                    continue;
+                }
                 level.setBlock(e.getKey(), e.getValue(), Block.UPDATE_ALL);
                 sealSnapshot.remove(e.getKey());
             }
@@ -218,17 +256,37 @@ public final class ArenaSession {
             BlockPos pos = BlockPos.containing(
                     com.klze.colossus.env.ArenaBlockAccess.rotateFacing(local, boss.getYRot())
                             .add(boss.position()));
-            BlockState current = level.getBlockState(pos);
-            if (!current.canBeReplaced()) {
-                // 静默跳过会在竞技场墙上留一个没人知道的缺口（P3-5）
-                Colossus.LOGGER.warn("arena seal slot {} occupied by {} — seal skipped, ring has a gap (boss {})",
-                        pos.toShortString(), current.getBlock().getName().getString(), boss.getBossId());
-                continue;
+            // 两个条件都先算成 boolean 再交给纯判据；{@code loaded &&} 这一段<b>必须短路</b>——
+            // 少了它，缺块时查 canBeReplaced 就已经把区块强制生成了，那道门等于没设。
+            boolean loaded = level.hasChunkAt(pos);
+            boolean replaceable = loaded && level.getBlockState(pos).canBeReplaced();
+            switch (ArenaBounds.classifySeal(loaded, replaceable)) {
+                case NO_CHUNK -> {
+                    // 缺块不硬放：这一格留空，环有洞，但洞是<b>记在账上</b>的（不生成区块、不谎报成功）
+                    if (OncePerKey.firstTime(who + "|arena-nochunk")) {
+                        Colossus.LOGGER.warn("arena seal slot {} skipped — chunk not loaded, "
+                                + "ring has a gap (boss {})", pos.toShortString(), boss.getBossId());
+                    }
+                    continue;
+                }
+                case OCCUPIED -> {
+                    // 静默跳过会在竞技场墙上留一个没人知道的缺口（P3-5）
+                    if (OncePerKey.firstTime(who + "|arena-occupied")) {
+                        Colossus.LOGGER.warn("arena seal slot {} occupied — seal skipped, ring has a gap (boss {})",
+                                pos.toShortString(), boss.getBossId());
+                    }
+                    continue;
+                }
+                default -> {
+                    sealSnapshot.put(pos.immutable(), level.getBlockState(pos));
+                    level.setBlock(pos, spec.sealBlock().defaultBlockState(), Block.UPDATE_ALL);
+                }
             }
-            sealSnapshot.put(pos.immutable(), current);
-            level.setBlock(pos, spec.sealBlock().defaultBlockState(), Block.UPDATE_ALL);
         }
     }
+
+    /** 还欠着多少格没还回世界（诊断与 GameTest 判据：解封不是"调用过就算完"）。 */
+    public int pendingRestoreCount() { return sealSnapshot.size(); }
 
     // ---------------- NBT 持久化（崩档/重载不吞封路） ----------------
 
@@ -254,14 +312,15 @@ public final class ArenaSession {
     public void load(CompoundTag tag, net.minecraft.world.level.Level readLevel) {
         active = tag.getBoolean("active");
         everEngaged = tag.getBoolean("ever_engaged");
-        if (tag.contains("home_x")) {
-            home = new Vec3(tag.getDouble("home_x"), tag.getDouble("home_y"), tag.getDouble("home_z"));
-        }
-        if (tag.contains("entry_x")) {
-            entryPoint = new Vec3(tag.getDouble("entry_x"), tag.getDouble("entry_y"), tag.getDouble("entry_z"));
-        }
-        sealSnapshot.clear();
+        // <b>三键齐 + 三轴可用</b>才认（第三十六批，v14 取证 B 节）。旧写法只看 {@code home_x}
+        // 在不在，于是少写一个 {@code home_y} 的存档会静默读成 0——竞技场圆心直接沉到世界底；
+        // 而 {@code getDouble} 对类型不对的键也是回 0（它内部走 mask=99 宽读数值、不认字符串）。
+        // 存在性判据必须用 {@code TAG_ANY_NUMERIC=99}（{@code Tag.java:24}）：用具体类型号会比
+        // 读取端更严，把"存成 Int 的合法存档"判成缺键＝整段边界静默失效（本仓已踩过三次）。
+        home = readTriple(tag, "home_x", "home_y", "home_z", "home");
+        entryPoint = readTriple(tag, "entry_x", "entry_y", "entry_z", "entry");
         ListTag snapshot = tag.getList("seal_snapshot", Tag.TAG_COMPOUND);
+        sealSnapshot.clear();
         for (int i = 0; i < snapshot.size(); i++) {
             CompoundTag entry = snapshot.getCompound(i);
             BlockState state = NbtUtils.readBlockState(
@@ -269,7 +328,30 @@ public final class ArenaSession {
                     entry.getCompound("state"));
             sealSnapshot.put(BlockPos.of(entry.getLong("pos")), state);
         }
-        Colossus.LOGGER.debug("arena session restored: active={} sealSnapshots={}", active, sealSnapshot.size());
+        Colossus.LOGGER.debug("arena session restored: active={} sealSnapshots={} home={}",
+                active, sealSnapshot.size(), home == null ? "<fallback: boss position>" : home.toString());
+    }
+
+    /**
+     * 读一个坐标三元组：缺任一键、或读出来不是有限/范围内的值，一律交 {@code null}——
+     * 让调用方既有的 {@code home == null ? boss.position() : home} 兜底去接，
+     * 而不是拿一个 (0,0,0) 或 NaN 去建 {@code AABB}（NaN 圆心会让 {@code contains} 恒假，
+     * 玩家在竞技场里<b>每 tick 都被判越界、被反复传送</b>）。
+     */
+    @Nullable
+    private Vec3 readTriple(CompoundTag tag, String kx, String ky, String kz, String what) {
+        if (!(tag.contains(kx, Tag.TAG_ANY_NUMERIC) && tag.contains(ky, Tag.TAG_ANY_NUMERIC)
+                && tag.contains(kz, Tag.TAG_ANY_NUMERIC))) {
+            return null; // 干净的"没写过"（会话还没 begin 过）——不报警
+        }
+        double x = tag.getDouble(kx), y = tag.getDouble(ky), z = tag.getDouble(kz);
+        if (ArenaBounds.usableCoordinate(x, y, z)) return new Vec3(x, y, z);
+        if (OncePerKey.firstTime(boss.getBossId() + "|arena-" + what)) {
+            Colossus.LOGGER.warn("arena {} point read from save is unusable ({}, {}, {}) — "
+                            + "falling back to the boss position (boss {})",
+                    what, x, y, z, boss.getBossId());
+        }
+        return null;
     }
 
     public Vec3 homeOrFallback() {

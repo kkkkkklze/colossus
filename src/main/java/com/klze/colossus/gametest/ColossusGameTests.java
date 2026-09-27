@@ -249,6 +249,58 @@ public class ColossusGameTests {
     }
 
     /**
+     * 竞技场存档读值的回退链（第三十六批，v14 取证 B 节）。旧写法只看第一个键在不在：
+     * 少写 {@code home_y} 的存档会静默读成 {@code (x, 0, z)}——竞技场圆心沉到世界底；
+     * 而 {@code NaN}/超世界边界的圆心会让 {@code AABB#contains} <b>恒假</b>，
+     * 于是参战玩家<b>每个 tick 都被判越界、被反复传送</b>（运行期最难受的一类故障）。
+     * 判据取"观测面只看自己名下的会话"，不看方块也不看玩家位置——本桩只证读值这一层。
+     */
+    @GameTest(template = YARD, timeoutTicks = 300, batch = "arena-save")
+    public void arenaSaveReadsOnlyUsableCoordinates(GameTestHelper helper) {
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        var arena = boss.arena();
+        helper.assertTrue(arena != null, "示范 Boss 必须声明 arenaSpec，否则这条桩什么都没测");
+
+        var good = new net.minecraft.nbt.CompoundTag();
+        good.putDouble("home_x", 100.5); good.putDouble("home_y", 64.0); good.putDouble("home_z", -200.25);
+        arena.load(good, helper.getLevel());
+        helper.assertTrue(arena.homeOrFallback().equals(new net.minecraft.world.phys.Vec3(100.5, 64.0, -200.25)),
+                "三键齐且有限时必须原样读回（防〔一律回退〕这种假修法）");
+
+        var missing = new net.minecraft.nbt.CompoundTag();
+        missing.putDouble("home_x", 100.5); missing.putDouble("home_z", -200.25); // 故意少 home_y
+        arena.load(missing, helper.getLevel());
+        var here = boss.position();
+        helper.assertTrue(arena.homeOrFallback().equals(here),
+                "缺一个轴时必须整体判不可用并回退到 Boss 位置，实际 " + arena.homeOrFallback()
+                        + "（静默读成 y=0 就是把圆心沉到世界底）");
+
+        var nan = new net.minecraft.nbt.CompoundTag();
+        nan.putDouble("home_x", 100.5); nan.putDouble("home_y", Double.NaN); nan.putDouble("home_z", -200.25);
+        arena.load(nan, helper.getLevel());
+        helper.assertTrue(arena.homeOrFallback().equals(boss.position()),
+                "NaN 圆心必须判不可用，否则 contains() 恒假 = 玩家每 tick 被弹一次");
+
+        var wrongType = new net.minecraft.nbt.CompoundTag();
+        wrongType.putString("home_x", "oops"); // getDouble 对字符串回 0，所以存在性判据要认得出这不是数值
+        wrongType.putDouble("home_y", 64.0); wrongType.putDouble("home_z", -200.25);
+        arena.load(wrongType, helper.getLevel());
+        helper.assertTrue(arena.homeOrFallback().equals(boss.position()),
+                "类型不对的键不许当成〔读到了 0 这个合法坐标〕");
+
+        // 宽读的那一半也必须成立：存成 Int/Long 的合法存档不能被判缺键（contains 用精确类型号就会）
+        var numericWidening = new net.minecraft.nbt.CompoundTag();
+        numericWidening.putInt("home_x", 10); numericWidening.putLong("home_y", 64L);
+        numericWidening.putFloat("home_z", -20.5f);
+        arena.load(numericWidening, helper.getLevel());
+        helper.assertTrue(arena.homeOrFallback().equals(new net.minecraft.world.phys.Vec3(10.0, 64.0, -20.5)),
+                "数值类型宽读必须仍然认（存在性判据用 mask=99，与 getDouble 内部同调）");
+
+        succeedClean(helper, boss);
+    }
+
+    /**
      * squad 身份账回归（第八批 P1 防重现桩 + 第九批成员基类接线）。
      *
      * <p>判别式设计：旧写法用 {@code AABB inflate(96)} 扫场认身份，所以<b>任何一次"当下查不到人"</b>

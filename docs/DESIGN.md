@@ -1129,3 +1129,55 @@ Copyright (c) 2026 klze）、`gradle.properties` 的 `mod_license=MIT`、`addons
 它还提醒两条工程前提（与本仓既有纪律一致，重申有效）：本批语料样本大量在 **1.21.x/26.x**，
 每抄一条先读该仓 `gradle.properties`；研究库克隆是**稀疏检出**，判"没有 mixin / 没有资源"
 必须以 `git ls-files` / `git show HEAD:` 为准。
+
+---
+
+## 第三十六批（v14/v15 来料落地：竞技场边界的读值与封解闸门）
+
+### 来料与前置核对（不是照抄代理的话）
+
+v14 B 节说"TF 1.20.1 在写封印方块前固定跑 `isRestrictionPointValid(dim) && level().isLoaded(pos)` 双短路，
+而本仓 `env/ArenaSession` 一次 `isLoaded` 都没有"。我回读磁盘核对时**两处都要更正**：
+
+- 派单时给的仓名 `TF3618__TwilightForest` **不存在**（v15 报的，我复现了）：1.20.1 那份真名
+  `marlester-dev__twilightforest-unofficial`，而 `TeamTwilight__twilightforest` 已是 MC 26.1/NeoForge。
+- 我亲眼打开并核到的两行：`EnforcedHomePoint.java:30-43`（`loadHomePointFromNbt` 两档回退、
+  两档都 miss 就保持 null，绝不回 `(0,0,0)`）与 `EntityUtil.java:56`
+  （`!isRestrictionPointValid(dim) ? boss.blockPosition() : ...`＝持久值无效就退到实体当下位置）。
+
+**v15 的负结果同样重要，必须写下来**：语料里**没有**成型的"三档回退"样本，也**没有**
+"clamp + 一次性告警"同体的写法（TF 那 7 处闸门失败全是**静默跳过**），BOSS 半径在很多仓压根不读 NBT
+（`Lich.java`/`Hydra.java` 硬编码 `return 20/30`）。所以下面这套判据是**本仓自拟**，
+只有"退到实体当下位置"这一条有先例可指。别把它记成"抄 TF 的"。
+
+### 落地（新增零 MC 纯类 `env/ArenaBounds` + 会话侧四处改动）
+
+| 改动 | 为什么（坏输入的真实后果） |
+|---|---|
+| `Spec` 紧凑构造器把四个可配参数交给 `ArenaBounds.radiusOr / graceTicksOr / warnEveryTicksOr` | 半轴为负或 NaN 时 `AABB` 的 min&gt;max ⇒ `contains()` **恒假** ⇒ 参战玩家<b>每 tick 被判越界、每 tick 被传送一次</b>。"配一个坏数字＝运行期折磨人"必须在登记期回默认值。宽限允许 0（"立刻拉回"是合法意图），提醒间隔必须 ≥1（0 会让冷却形同不存在） |
+| `load()` 的 `readTriple()`：三键齐（`contains(k, Tag.TAG_ANY_NUMERIC)`，与 `getDouble` 内部同调）+ 三轴有限且在世界范围内，才认；否则置 null | 旧写法只看第一个键在不在 ⇒ 少写 `home_y` 的存档静默读成 `(x, 0, z)`（圆心沉到世界底）。存在性判据**必须用 99**：用具体类型号会比读取端更严，把存成 Int/Long 的合法存档判成缺键＝整段边界静默失效（本仓第三次踩） |
+| 封路 `classifySeal(loaded, replaceable)`，**区块排在被占之前**；解封同一条判据 | 服务端 `getBlockState` 对缺失区块会**强制生成**，而这件事发生在 Boss 的 tick 里。`replaceable = loaded && …` 的短路是判据本体，少了它门等于没设 |
+| 解封失败**不删账** + `tick()` 在 `!active` 时继续追偿 + 实体侧去掉 `if (arena.isActive())` 那道门 | 旧写法"调过 setBlock 就 remove"，于是区块没加载的那一次把快照也删了：一堵黑曜石永久留在玩家世界里，且再没人负责还原。**保留追偿路径必须同时把调用点的门拆掉**，否则那条路径是永远不会执行的死路——而它看起来像修好了 |
+| `safeLanding` 的缺块判断改走 `ArenaBounds.worldReady` | 同一个规则不许有两份写法 |
+
+### 判据（自检 150 → 155；GameTest 14 → 15，audit 下限同步抬到 15）
+
+`testArenaBounds()` 五条全部走等号/具体值：坏半轴一律回默认**且回出来的值仍 >0**（这条才是防弹跳风暴的真判据）、
+计时参数合法域、`usableCoordinate` 的 NaN/Inf/越界、`classifySeal` 的**优先级**（`classifySeal(false, false)`
+必须是 NO_CHUNK 而不是 OCCUPIED）、解封未成功必须报 not-ready 以便快照存活。
+
+`arenaSaveReadsOnlyUsableCoordinates` 五段：齐且有限必须**原样读回**（防"一律回退"这种假修法）、
+缺一轴整体不可用并回退到 Boss 位置、NaN 圆心不可用、字符串键不许读成 0、
+**Int/Long/Float 宽读必须仍然认**（这一头防的是把存在性判据写死成具体类型号）。
+
+### ⬜ 本批没做
+
+- `entryPoint` 是"写了、存了、读了，但没人用"的字段——`fail()` 里并没有文档声称的"团灭弹回入场点"。
+  要么实现要么连同两个 NBT 键一起删，**不留在账上装样子**。
+- 离场 N 秒判负的计时器：v15 全库 0 例，形态得自己定。
+- `ArenaSpec` 未走 datapack/JSON（只有 Java DSL 一条口），所以 `radiusOr` 的钳位在 JSON 侧暂无入口。
+- 追偿路径（缺块时保留快照）今天只有纯函数判据 + `pendingRestoreCount()` 口径，
+  **没有**能造出"未加载区块"的 GameTest 桩——那条路径的运行期证明仍缺。
+
+验证：build（`-Pgecko`）+ 自检 **155/155** + `gameTestAudit: 15 @GameTest declared (floor 15) OK` +
+`runGameTestServer` **All 15 required tests passed**（两轮）。
