@@ -49,4 +49,4 @@ gradlew runGameTestServer # 真服务端 GameTest（击杀路径全链回归；�
 | mod id | `colossus` |
 | 包 | `com.klze.colossus` |
 | Loader | Forge 1.20.1（47.4.23，ModDevGradle legacyforge） |
-| 许可 | 暂定 All Rights Reserved（框架定位建议 MIT/LGPL，待定夺） |
+| 许可 | MIT（2026-09-27 拍板；正本见 `LICENSE`。模板文件自身的许可另见 `TEMPLATE_LICENSE.txt`） |

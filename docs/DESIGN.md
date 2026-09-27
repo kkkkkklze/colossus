@@ -149,7 +149,12 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 3. 数据断言：KillBoard NBT、`ATTACK_*`/`SHIELD`/`colossus_works` 同步值从磁盘/世界回读。
 
 ## 5. 偏差与遗留记录（交付时同步更新）
-- 许可证暂留 All Rights Reserved——框架定位是"方便别人写 Boss"，建议改 MIT/LGPL 才成生态底座，待用户拍板。
+- 许可证：**2026-09-27 用户拍板改 MIT**（正本 `LICENSE`，`mod_license=MIT`，addon 的 `mods.toml` 同步）。
+  理由与既有立场一致——框架定位是"方便别人写 Boss"，permissive 才成生态底座。
+  下方各批次 ⬜ 里写"仍 ARR"的那些行是**当时的实况**，不回改历史；MIT 之后新增的三条边界：
+  ① `TEMPLATE_LICENSE.txt`（NeoForged MDK，MIT）继续单独保留；② Cataclysm 系 CC BY-NC-ND 与
+  Fuzss/Shadows-of-Fire 系 ARR 的语料**只取结构不取文本**这条纪律不变（§0 第 7 条）；
+  ③ 下游拿去闭源/再分发都允许，但必须保留版权与许可声明——所以 `LICENSE` 与文件头的归属必须长期正确。
 - 示范 Boss 的模型是占位方块，仅证明管线通。
 - v0.1 读档后攻击中断回 idle（BR 的整栈 NBT 留到 v0.2）。
 
@@ -1090,3 +1095,37 @@ vanilla `ServerEntity#sendPairingData:237-239` 会给新追踪者自动补一份
 `emission overflow evicts the longest-silent outline…` 红；**MUT-T**（`book` 逐出走 end 最小）⇒
 `tail eviction drops the slowest-decaying entry…` 红（S+T 同跑时 `2/150`）。
 **MUT-T 就是本仓欠了三轮的那个东西**：轮 21 的 MUT-J 因编译失败不算数，这次"逐出策略"第一次有了能红的变异。
+
+---
+
+## 附：许可证裁定落地 + 另一会话留下的"研究库情报"文件处置（2026-09-27）
+
+**许可改 MIT**（用户拍板）。触点四处，改后 `build` 复跑绿：`LICENSE`（新增，MIT 正本，
+Copyright (c) 2026 klze）、`gradle.properties` 的 `mod_license=MIT`、`addons/colossus-gecko/.../mods.toml`
+的 `license="MIT"`、`README.md` 工程身份表那一行。**没有回改**各批次 ⬜ 里"仍 ARR"的历史行——那是当时实况，
+本段就是它们的终止线。留三条边界：① `TEMPLATE_LICENSE.txt`（MDK 模板自身，MIT）继续单独存在；
+② Cataclysm 系 CC BY-NC-ND 与 Fuzss/Shadows-of-Fire 系 ARR 的语料**只取结构不取文本**（§0 第 7 条不变）；
+③ MIT 意味着下游可闭源再分发，但须保留声明——所以 `LICENSE` 的归属名/年份以后是**对外法律字段**，
+改动要人批。想换成 LGPL-3 只需改 `LICENSE` + `mod_license` + addon `mods.toml` 三处，代码不用动。
+
+**那份 `docs/研究库情报__来自Mod源码研究汇总-2026-09-25.md`**：另一会话留下的跨会话提醒（52 行，未跟踪）。
+我逐条读完了。它有价值但**不属于这个仓的正本**，四条可执行的先落到这里，然后按用户指示删除原文件
+（删除前副本在 `/tmp/研究库情报.foreign-copy.md`）：
+
+1. **血条色档的钳法**（它给 `Tfarcenim__OverloadedArmorBar/.../ArmorBar.java:13-60`）——
+   "档 = 值 / 步长"、色表比档数短时钳到最后一档、半格与空格用**上一档**色。给 `bar/` 线做多阶段破绽条时用。
+   状态：⬜ 未落地，且它自己标的这条是 **[已复核]**、同仓"带动画"那句是 **[报告记载]**（别当已证）。
+2. **"同一判定两个入口，门要分别打红"**（`AgeingSpawners` 事件路径查 gamerule、mixin 路径没查）——
+   与本仓 `delete-old-path-when-replacing-logic` 同源，已在轮 20/21 的"双份结算/两处键格式"审计里执行过。
+3. **免协议的纯客户端受击反馈**（`JeremySeq__DamageIndicators` 逐 tick 比血量差、方向取
+   `getLastDamageSource().getSourcePosition()`）——适合"受击方向指示"这类只表现已同步量的需求；
+   它同时指出该仓飘字清理写在拷贝上导致源表只增不减，**别照抄那行**。状态：⬜ 未落地（表现层候选）。
+4. **广播走 entity tracking 而不是遍历 players()**（`ping_system` 反面样本）——
+   我按这条回查了自己两处：`network/ColossusPackets.java:210` 用的是
+   `PacketDistributor.TRACKING_ENTITY` ✅；`:241` 的 `ALL.noArg()` 只在进度代际号变化时发（脏检查在上层）✅；
+   `entity/ColossusBossEntity.java:1372` 的 `getPlayerList().getPlayers()` 遍历是**首杀一次性播报**，
+   频次是"每 Boss 一生一次"，不构成它说的那类每事件全量扫描 ⇒ **不改**，但这条判据从此有账可查。
+
+它还提醒两条工程前提（与本仓既有纪律一致，重申有效）：本批语料样本大量在 **1.21.x/26.x**，
+每抄一条先读该仓 `gradle.properties`；研究库克隆是**稀疏检出**，判"没有 mixin / 没有资源"
+必须以 `git ls-files` / `git show HEAD:` 为准。
