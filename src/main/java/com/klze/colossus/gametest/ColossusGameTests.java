@@ -224,6 +224,11 @@ public class ColossusGameTests {
             var arena = boss.arena();
             helper.assertTrue(arena != null && arena.isActive(),
                     "activated 上升沿应开启竞技场会话");
+            // 轮 24 P2-D2：封路必须把"在哪个维度封的"一起记下——long 坐标跨维度同号，
+            // 没有这个键，Boss 换维度之后的追偿会把上一维度的原方块写进当前维度。
+            helper.assertTrue(helper.getLevel().dimension().location().toString()
+                            .equals(arena.sealDimension()),
+                    "开战时必须记下封路维度，实际 " + arena.sealDimension());
             var sealed = new java.util.ArrayList<>(arena.sealedPositions());
             helper.assertTrue(sealed.size() == 2,
                     "两个封路偏移都该入快照（未入快照的位=解封时没人还原）");
@@ -238,6 +243,8 @@ public class ColossusGameTests {
             helper.runAfterDelay(180, () -> {
                 helper.assertTrue(boss.isRemoved(), "Boss 应已结算移除");
                 helper.assertTrue(arena.sealedPositions().isEmpty(), "解封后快照必须清空");
+                helper.assertTrue(arena.pendingRestoreCount() == 0,
+                        "胜利那条路上的欠账也必须被追偿掉（轮 24 P2-D1：deathPending 之前要驱动一次）");
                 for (BlockPos pos : sealed) {
                     helper.assertTrue(helper.getLevel().getBlockState(pos).isAir(),
                             "封路位 " + pos + " 必须还原为空气，实际 "
@@ -377,6 +384,47 @@ public class ColossusGameTests {
                         succeedClean(helper, revived, wrong);
                     });
                 });
+            });
+        });
+    }
+
+    /**
+     * 胜利之后<b>还欠着</b>的封路块必须继续追偿（轮 24 P2-D1）。这条路径原先跑不到：
+     * 胜利解封发生在 {@code resolveDeath}，而 {@code deathPending} 一直保持到原版 remove，
+     * 实体 {@code aiStep} 在 {@code deathPending} 那道 return 之前到不了会话驱动 ⇒
+     * 欠着的快照随实体一起消失，黑曜石永久留在玩家世界里。
+     *
+     * <p>"区块没加载"这个现场在 GameTest 里造不出来（结构范围内一定加载），所以用
+     * {@code debugDeferNextRestore()} 故意欠一格——它走的是<b>同一条</b>"不删账"路径。
+     * 两头都要钉：① {@code debugDeferredCount()==1} 证明确实欠过（不然这条桩会退化成上一条测试）；
+     * ② 之后账必须清零且方块真的还原成空气（证明追偿在 Boss 已经死了的这段时间里被驱动过）。
+     */
+    @GameTest(template = YARD, timeoutTicks = 500, batch = "arena-debt")
+    public void victoryPathKeepsSettlingDeferredSealSlots(GameTestHelper helper) {
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        var mock = helper.makeMockPlayer();
+        boss.hurt(boss.damageSources().playerAttack(mock), 1.0f);
+        helper.runAfterDelay(2, () -> {
+            var arena = boss.arena();
+            helper.assertTrue(arena != null && arena.isActive() && arena.pendingRestoreCount() == 2,
+                    "会话应已封好两格，实际欠账数 " + (arena == null ? "null" : arena.pendingRestoreCount()));
+            arena.debugDeferNextRestore();
+            var sealed = new java.util.ArrayList<>(arena.sealedPositions());
+            boss.hurt(boss.damageSources().playerAttack(mock), 10_000f);
+            helper.runAfterDelay(140, () -> {
+                helper.assertTrue(arena.debugDeferredCount() == 1,
+                        "测试缝必须真的让它欠下一格，否则这条桩什么都没测到，实际 "
+                                + arena.debugDeferredCount());
+                helper.assertTrue(arena.pendingRestoreCount() == 0,
+                        "欠着的那一格必须在 Boss 的死亡流程里被继续追偿掉（轮 24 P2-D1），实际剩 "
+                                + arena.pendingRestoreCount() + " 格");
+                boolean backToAir = true;
+                for (BlockPos pos : sealed) {
+                    backToAir &= helper.getLevel().getBlockState(pos).isAir();
+                }
+                helper.assertTrue(backToAir, "追偿完成后封路位必须全部还原成空气");
+                succeedClean(helper, boss);
             });
         });
     }

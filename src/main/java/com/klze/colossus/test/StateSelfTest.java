@@ -627,6 +627,18 @@ public final class StateSelfTest {
                 && FrameRunner.bitGate(-1L, 2) != null
                 && FrameRunner.bitGate(-1L, 64) == null
                 && FrameRunner.bitGate(0L, 0) == null;         // 空表：0 位不算越界
+        // 时间侧的域闸门（轮 24 P3-A2）：负 tick 会把每一帧都判成"已过窗口"⇒ 整招静音，
+        // 而 || 语义下这份静音<b>再也解不开</b>。它必须与位图那侧对称，不能只防一半。
+        boolean tickGate = FrameRunner.tickGate(0) == null
+                && FrameRunner.tickGate(1) == null
+                && FrameRunner.tickGate(-1) != null
+                && FrameRunner.tickGate(Integer.MIN_VALUE) != null;
+        var negRunner = FrameRunner.<List<Integer>>builder().at(3, (c, tk) -> c.add(tk)).build();
+        String negRefused = negRunner.resumeFrom(-5, 0L, negRunner.framesDigest());
+        List<Integer> negHits = new ArrayList<>();
+        for (int tk = 1; tk <= 5; tk++) negRunner.advance(negHits, tk);
+        check("a negative state tick is refused by the same gate that covers foreign bits (and changes nothing)",
+                tickGate && negRefused != null && negRefused.contains("negative") && negHits.equals(List.of(3)));
         check("the foreign-bit gate rejects bits above the table but lets a full 64-entry bitmap through",
                 bitGate);
 
@@ -701,6 +713,18 @@ public final class StateSelfTest {
 
         // ⑤解封：区块没加载 ⇒ 这一格<b>不许当作已恢复</b>（旧写法调过 setBlock 就删账，
         // 于是方块永久留在世界里、连重试的机会都没了）
+        // 轮 24 P2-D2：维度这一关排在区块之前，且<b>不匹配时既不写也不删账</b>。
+        // long 坐标跨维度同号，少了这道关，Boss 换维度之后追偿会把上一维度的原方块写进当前维度。
+        boolean dimGate = !com.klze.colossus.env.ArenaBounds.restoreAllowed(false, true)
+                && !com.klze.colossus.env.ArenaBounds.restoreAllowed(false, false)
+                && !com.klze.colossus.env.ArenaBounds.restoreAllowed(true, false)
+                && com.klze.colossus.env.ArenaBounds.restoreAllowed(true, true)
+                // 同格二次封必须认出来（轮 24 P3-D3）：否则"先放后记"会把刚放下的封印方块
+                // 当成原方块记账，解封时把封印还原成封印、原方块永久丢失
+                && com.klze.colossus.env.ArenaBounds.slotAlreadySealed(true)
+                && !com.klze.colossus.env.ArenaBounds.slotAlreadySealed(false);
+        check("a seal slot is restored only in the dimension it was sealed in, and a reused slot is refused",
+                dimGate);
         check("an unrestored slot is reported as not-ready so its snapshot survives for retry",
                 !com.klze.colossus.env.ArenaBounds.worldReady(false)
                         && com.klze.colossus.env.ArenaBounds.worldReady(true));
@@ -955,7 +979,9 @@ public final class StateSelfTest {
         idempotent &= neverEmitted.size() == 0 && neverEmitted.bookNow(600L, ceiling) == 0;
         // 轮 23 P3-5：低报必须<b>至少可观测</b>。retire 的返回值原先在两个调用点都被丢弃，
         // 于是"根本没记上"与"记上又被逐出"这两件事只有自检知道。计数器是客户端一次性告警的口子。
-        idempotent &= neverEmitted.rejectedBookings() == 1;
+        // 轮 24 P3-B2：这类"良性没账可记"必须**不计进真低报**，否则任何一场用 ring 的 Boss 战
+        // 都会让报警计数器稳定增长，那个"一次性告警"就废了。
+        idempotent &= neverEmitted.evictedBookings() == 0 && neverEmitted.untrackedRetirements() == 1;
         var crowded = new com.klze.colossus.env.TailLedger();
         // 每条圈的发射跨度都做有梯度的（轮 22 §4.2 + 轮 23 的新模型）：尾段窗口现在直接是
         // {@code [首次发射 tick, 末次发射 tick + 1)}，所以两端都不同 ⇒ "按 end 逐出"真的可测。
@@ -1040,6 +1066,23 @@ public final class StateSelfTest {
                         && com.klze.colossus.env.TelegraphBudget.tailAlive(5, 48, 1_000L, 1_010L, 900L) == 5 * 10
                         && com.klze.colossus.env.TelegraphBudget.tailAlive(5, 48, 1_000L, 1_010L, 2_000L) == 0);
         check("tail residue is booked to exactly 25% of the ceiling while the physical residue is larger", capped);
+        // 两个计数器各记各的（轮 24 P3-B2 的判据面）：上面那次"记上就被逐出"要进真低报口径，
+        // 而良性退休不能混进来——否则报警对象和噪声同一个数字，阈值一加就漏掉真低报。
+        var counterLedger = new com.klze.colossus.env.TailLedger();
+        counterLedger.retire(1234L, 48);                       // 从没发射过：良性
+        for (int i = 1; i <= com.klze.colossus.env.TailLedger.MAX_ENTRIES; i++) {
+            counterLedger.noteEmission(i, 5, 200L);
+            counterLedger.noteEmission(i, 5, 200L + i);
+            counterLedger.retire(i, 48);
+        }
+        counterLedger.noteEmission(999L, 5, 90_000L);          // 一条衰减最慢的（end 最大 ⇒ 必被逐出）
+        boolean countersClean = counterLedger.untrackedRetirements() == 1
+                && counterLedger.evictedBookings() == 0;
+        boolean evictedCounted = counterLedger.retire(999L, 48) == false
+                && counterLedger.evictedBookings() == 1
+                && counterLedger.untrackedRetirements() == 1;  // 真低报不许污染良性口径
+        check("the two booking counters stay separate (benign retirement never counts as under-booking)",
+                countersClean && evictedCounted);
         check("tail eviction drops the slowest-decaying entry and keeps the nearly-faded one", dropsSlowest);
         check("the tail window follows the last real emission tick, not the nominal expiry", honestWindow);
         // 轮 22 P2-7：客户端"这一 tick 到底撒不撒"的三道门原先只是三个 early-return 的<b>相对位置</b>，

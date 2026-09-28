@@ -1267,3 +1267,48 @@ v14 B 节说"TF 1.20.1 在写封印方块前固定跑 `isRestrictionPointValid(d
 
 验证：build（`-Pgecko`）+ 自检 **161/161** + `gameTestAudit: 16 @GameTest declared (floor 16) OK` +
 `runGameTestServer` **All 16 required tests passed**（两轮）。
+
+---
+
+## 第三十九批（审查轮 24 处置）：D-1 抓到我上一批"修好了一半还说修好了"
+
+轮 24 正本 `docs/代码审查-v0.2-round24-findings.md`（246 行，**3×P2 + 6×P3**，
+另"审过且成立"9 条、"未核实"7 条）。它最有价值的一条是 **D-1**：第三十六批我加了一条
+"会话结束后继续追偿欠账"，并在实体侧注释里写"沿用 `isActive` 那道门就是死路"——
+**门确实拆了，但拆的是第二道**：`ColossusBossEntity` 的 `aiStep` 在上面还有
+`if (deathPending || isTransitioning) return;`，而胜利解封发生在 `resolveDeath → victory()`、
+`deathPending` 一直保持到原版 remove ⇒ 那条追偿在**胜利**这条路上一次都跑不到，
+欠着的快照随实体一起消失、黑曜石永久留在玩家世界里。团灭那条路（`fail()`，Boss 还活着）是真修好了。
+
+| 编号 | 一句话 | 处置 |
+|---|---|---|
+| **P2-D1** | 胜利路径上追偿不可达（上面那段） | ✅ 新增显式入口 `ArenaSession.pumpRestoreOnly(level)`（只还账、不做别的），实体侧把它驱动在 `deathPending` 那道 return **之前**；`tick()` 的非活动分支改为复用它（一个入口一条规则） |
+| **P2-D2** | 封路快照只有 `pos + state`，**没有维度键**；而上一批把欠账从"1 tick 生命周期"改成"无限期追偿"，于是 Boss 换维度后 `hasChunkAt(pos)` 问的是**另一个世界同一坐标**（`long` 坐标跨维度同号），大概率"加载着"，就把上一维度的原方块写进当前维度——静默改错世界，原来那格还扣着封印 | ✅ 快照带 `seal_dim`；新纯判据 `ArenaBounds.restoreAllowed(sameDimension, chunkLoaded)`——**维度排在区块之前**；不匹配时既不写也不删账（账留着，Boss 回去还得掉），一次性 warn 里说清是"区块没加载"还是"维度不对、Boss 搬走了？" |
+| **P3-A1** | 指纹闸保护的输入今天不存在 | **本批已由 `26b6009` 接线关掉**：`colossus_state_*` 四键现在真的写、真的读，`resumeRejection` 有生产调用点，那句注释现在说的是事实 |
+| **P3-A2** | 位图侧有域闸、`tickAt` 侧没有：负 tick 会把每帧都判成"已过窗口"⇒ 整招静音且**再也解不开** | ✅ `FrameRunner.tickGate(tickAt)`，与越界位并成同一档；`resumeFrom` 与合口径 `resumeRejection` 都先过它（拒绝时状态一点不动） |
+| **P3-B1** | `book` 的"率非正／窗口零长"那一支在 P2-4 之后**不可达**，却还是三个计数口径之一 ⇒ 口径谎报 | ✅ 守卫留着当私有不变量断言但**不计数**；文档改成两类 |
+| **P3-B2** | `rejectedBookings` 一出生就是噪声：几何档（`ring`）一生不撒粒子，每次退休都 +1，将来那个"一次性告警"要么永远不响要么每场都响 | ✅ 拆成 `evictedBookings()`（真低报：记上被溢出逐出）与 `untrackedRetirements()`（良性：没账可记），`clear()` 两个都复位；判据两头钉（含"良性退休绝不计进真低报"） |
+| **P3-B3** | `tailAlive` 满峰值那一支的注释理由（"登记时刻来自服务端可达几千"）已被 P2-4 的改动取消——现在尾段的 `start` 也是本地钟 | ✅ 注释换成本仓事实：今天能走到这一支的只有"外部把钟往回拨"与第三方直接构造；行为不变（仍宁压不假） |
+| **P3-C1** | 全局额度的**满足顺序**两份说法方向相反：`MAX_LIVE_GLOBAL` 的 javadoc 写"按最近一次投影变化满足"，代码走的是 `ZONES` 插入序 ⇒ 最新登记那发排在最后、最容易被饿死（与轮 20 P1 点名的症状同名） | ✅ 文档改成实话并交代为什么不再排序（不想为公平引入每帧分配）。**没有**改代码去排序——那会引入每帧分配，方向与这条闸存在的理由相反 |
+| **P3-D3** | `Spec` 的"合法域只在一处定义"只覆盖四个数值参数：`sealBlock` 传 null 会炸在 `begin()` 那一 tick；两条不同 `Vec3` 偏移取整可落进同一格，"先放后记"会把刚放下的封印方块当成"原方块"记账（解封时把封印还原成封印，原方块永久丢失）；`begin()` 也从不清上一局的欠账 | ✅ `Spec` 紧凑构造器拒 null 方块与空偏移；封路时同格二次封跳过（`ArenaBounds.slotAlreadySealed`）+ 一次性 warn；`begin()` 开头先结清欠账并 warn |
+
+**这条桩为什么这次敢说自己有牙**：`arena-debt` 那条 GameTest 用 `debugDeferNextRestore()` 故意欠一格
+（GameTest 结构范围内造不出"区块没加载"），两头都钉——① `debugDeferredCount()==1` 证明"确实欠过"，
+② 之后账必须清零且方块回到空气。**变异验证**：把实体侧那行 `pumpRestoreOnly(server)` 删掉 ⇒
+`victorypathkeepssettlingdeferredsealslots` 如期变红（"实际剩 1 格"），还原后全绿。
+纯判据侧 **MUT-Y**（解封不看维度）、**MUT-Z**（撤 `tickGate`）、**MUT-AA**（两个计数器合回一个）
+也各自把对应断言打红（合跑 `4/164`）。
+
+### v16 来料（`深挖__BOSS引擎调研v16__动画时长与逻辑时长耦合取证.md`，160 行）
+
+取向结论可直接用：**语料里动画时长与 duration 的一致性校验／报错／钳位 0 例，动画进度 C→S 同步 0 例**——
+"两边各自查表、谁也不问谁"才是通行做法，所以我们那套"服务端帧表 + 动画只是显示层缝"不是妥协而是主流形态。
+两条警示必须记住：① 语料里的 GeckoLib 源码仓是 **GeckoLib 5**（包名 `com.geckolib`），
+GL4 的包名是 `software.bernie.geckolib[.core]`，**别拿它当 1.20.1 事实引用**；
+② Ars-Nouveau 的 `PacketOneShotAnimation` 用 `CustomPacketPayload`+`StreamCodec`（1.20.5+ 网络层），
+思路可看、代码不可照抄到 1.20.1 Forge。可抄的最小一块：OrdertoCook（同 MC 同 GL 大版本）
+覆盖 `Animatable#getTick` 返回 `this.tickCount`，把动画取时基准从渲染时钟换成**实体 tick**——
+这正是我们 `anim/` 要"按进度 seek"时唯一可靠的地基（未落地，挂账）。
+
+验证：build（`-Pgecko`）+ 自检 **164/164**（161→164）+ `gameTestAudit: 17 @GameTest declared (floor 17) OK` +
+`runGameTestServer` **All 17 required tests passed**（两轮）；变异 MUT-Y/Z/AA/AB 全部如期变红并还原。

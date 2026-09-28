@@ -106,5 +106,26 @@ public final class ArenaBounds {
         return chunkLoaded;
     }
 
+    /**
+     * 这一格欠账<b>现在该不该还</b>——两个条件都要，且<b>维度排在区块之前</b>。
+     *
+     * <p>为什么必须有维度这一半（审查轮 24 P2-D2）：封路快照记的是 {@code long} 坐标，而
+     * 不同维度共用同一套坐标编码——Boss 换维度（传送门、被别的 mod 搬运）之后，
+     * {@code hasChunkAt(pos)} 问的是<b>另一个世界的同一坐标</b>，那一块大概率是加载的，
+     * 于是原方块状态会被写进<b>当前维度</b>：静默改错世界，而原来那格还扣着封印方块。
+     * 上一批把"欠账"从 1 tick 的短命改成无限期追偿之后，这条路从理论变成可达，所以必须现在补。
+     *
+     * <p>不匹配时既不写也不删账——账留着，Boss 回到那个维度时仍然还得掉；
+     * 但必须有一次性告警，否则"永远追不完"和"已经追完了"在外部看不出区别。
+     */
+    public static boolean restoreAllowed(boolean sameDimension, boolean chunkLoaded) {
+        return sameDimension && worldReady(chunkLoaded);
+    }
+
+    /** 这一格是不是<b>本局已经封过</b>的（同一格第二次封会把上一格刚放下去的封印方块当成"原方块"记账）。 */
+    public static boolean slotAlreadySealed(boolean alreadyInSnapshot) {
+        return alreadyInSnapshot;
+    }
+
     private ArenaBounds() {}
 }

@@ -279,7 +279,7 @@ tasks.register('gameTestAudit') {
         fileTree('src/main/java').matching { include '**/*.java' }.each { f ->
             f.eachLine { l -> if (l.trim().startsWith('@GameTest(')) count++ }
         }
-        int floor = 16 // 跟着声明数走：加了桩就抬上来，删桩必须同时改这里（这条门的全部意义就是"不许无声下跌"）
+        int floor = 17 // 跟着声明数走：加了桩就抬上来，删桩必须同时改这里（这条门的全部意义就是"不许无声下跌"）
         if (count < floor) {
             throw new GradleException("gameTestAudit: only " + count + " @GameTest declared, floor is " + floor + " — 回归条数不许无声下跌")
         }

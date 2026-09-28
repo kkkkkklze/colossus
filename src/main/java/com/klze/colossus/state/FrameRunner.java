@@ -211,7 +211,8 @@ public final class FrameRunner<C> {
      * @return {@code null}＝已续播；否则给出一条能直接进日志的拒绝理由（状态<b>未</b>被改动）
      */
     public String resumeFrom(int tickAt, long bitmap, long savedDigest) {
-        String bad = digestGate(savedDigest, this.framesDigest);
+        String bad = tickGate(tickAt);
+        if (bad == null) bad = digestGate(savedDigest, this.framesDigest);
         if (bad == null) bad = bitGate(bitmap, frames.size());
         if (bad != null) return bad;
         this.lastTick = Math.max(tickAt, this.lastTick); // 绝不允许倒退：倒退会重放整段窗口
@@ -303,6 +304,14 @@ public final class FrameRunner<C> {
      * 两种都不该照单全收。{@code n == 64} 必须让路：{@code -1L << 64} 会别名回 {@code -1L << 0}，
      * 不让路就会把合法的满宽位图判成损坏。
      */
+    /** 时间侧的域闸门：负数"招内 tick"没有意义，且会把 lastTick 毒化成倒退（轮 24 P3-A2）。 */
+    public static String tickGate(int tickAt) {
+        if (tickAt < 0) {
+            return "tickAt " + tickAt + ": negative — a state tick counts up from 1, so this save is corrupt";
+        }
+        return null;
+    }
+
     public static String bitGate(long bitmap, int frameCount) {
         if (frameCount < MAX_PERSISTABLE_FRAMES && (bitmap & (-1L << frameCount)) != 0L) {
             return "bitmap " + bitmap + " carries bits above the " + frameCount
@@ -322,7 +331,9 @@ public final class FrameRunner<C> {
     public static String resumeRejection(int stateTick, int durationTicks, int elapsedTicksWhileLoaded,
                                          long bitmap, int frameCount,
                                          long savedDigest, long actualDigest) {
-        String bad = digestGate(savedDigest, actualDigest);
+        String bad = tickGate(stateTick);
+        if (bad != null) return bad;
+        bad = digestGate(savedDigest, actualDigest);
         if (bad != null) return bad;
         bad = bitGate(bitmap, frameCount);
         if (bad != null) return bad;

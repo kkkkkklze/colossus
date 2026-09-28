@@ -45,10 +45,15 @@ public final class TelegraphBudget {
      * {@code getParticleGroup()} 非空的粒子查容量（dust/END_ROD 都不在任何 group 里），
      * 而框架用 {@code force=true} 又短路掉了 {@code LevelRenderer:2509-2514} 那两道事实上的闸。
      *
-     * <p>额度不够时<b>按"最近一次投影变化"的顺序满足</b>（{@code TelegraphClient.ZONES} 是插入序，
-     * 而每次快照变化都会先 {@code dropOwner} 再整批重插 ⇒ 这个顺序表达的是"最近被重投"，
-     * <b>不是</b>"最先登记"——轮 19 P3-7 把先前那句"先登记的先满足"改准）。按距离排序要每帧分配
-     * 并排一个数组，而这条闸存在的理由正是"别为了精确公平再引入新的成本"。
+     * <p>额度不够时<b>按 {@code ZONES} 的插入序满足</b>，也就是<b>最先登记的先拿到额度</b>；
+     * 最新登记的那一发预警排在最后，<b>最容易整发拿不到额度</b>（审查轮 24 P3-C1 改的正是这句——
+     * 原先这里写着"按最近一次投影变化的顺序满足"，方向与代码相反）。为什么方向会变：轮 20 把
+     * {@code dropOwner} 换成按键幂等的 {@code retireOwner} 之后，没被重投的圈<b>留在表头</b>
+     * （{@code LinkedHashMap.put} 对已有键不移动位置），只有新圈/重投圈落到表尾。
+     *
+     * <p>没有为公平再排序是<b>有意的</b>：按距离排序要每帧分配并排一个数组，而这条闸存在的理由
+     * 正是"别为了精确公平引入新的成本"。但代价必须写在明面上——"最新那发预警最容易被饿死"
+     * 与轮 20 P1 点名的症状同名，只是那一条讲的是幽灵账、这一条讲的是满足顺序本身。
      */
     public static final int MAX_LIVE_GLOBAL = 2000;
 
@@ -152,13 +157,13 @@ public final class TelegraphBudget {
         long from = Math.max(startGameTime, nowGameTime - life);
         long to = Math.min(endGameTime, nowGameTime);
         long span = to - from;
-        // <b>只有"本地钟还没走到这一发的发射起点"才按满峰值记</b>（审查轮 22 §0 第 3 行；判据见 P2-4）：
-        // 正常的尾段恒有 end <= now，走不到这一支；走得到的是换维度/重生的那批——新 ClientLevel
-        // 从 gameTime=0 起算，而登记时刻来自服务端（可达几千），原先这里交出 0，等于在最该保守
-        // 的时刻把已经撒出去的粒子记成不存在。与本文件既有口径一致：<b>宁压不假</b>
-        // （TelegraphClient 的"落后超过一整个寿命才不画"是同方向的选择）。
-        // 归零的另一头不能被这一支误伤：now 在 (start, end+life) 之内都走正常求交，
-        // 只有 now <= start 才进这里。
+        // <b>只有"观测点还没走到发射起点"才按满峰值记</b>（轮 24 P3-B3 换掉了这段的理由文字：
+        // 原先写的是"登记时刻来自服务端可达几千"，而轮 23 P2-4 之后尾段的 start <b>也是本地钟</b>
+        // ——账本自己记的首次发射 tick。所以那条"服务端几千 tick"的输入今天构造不出来，
+        // 再留着它会让下一个人以为有一类服务端时基的尾段靠这支兜着）。
+        // 今天还能走到这一支的只有外部动作：/time set 往回拨、或调用方直接喂一个未来的 start
+        // （TelegraphZone/FrameRunner 都允许第三方直接构造）。方向与全文件一致：<b>宁压不假</b>。
+        // 归零那一头不能被误伤：now 落在 (start, end+life) 之内都走正常求交，只有 now <= start 进这里。
         if (span <= 0L) {
             if (nowGameTime > startGameTime) return 0;             // 已散干净 / 尚未开始：真 0
             return ratePerTick * (int) Math.min(life, emissionSpan(startGameTime, endGameTime));

@@ -60,6 +60,15 @@ public final class ArenaSession {
          * 这类"配一个坏数字＝运行期折磨人"的输入必须在登记期回默认值（同 {@code TelegraphZone} 的口径）。
          */
         public Spec {
+            // 方块与偏移列表也在登记期查（轮 24 P3-D3）：null 的 sealBlock 会炸在 begin() 里的
+            // defaultBlockState()，正是本仓刚在 MoveDef 上躲开的那种"运行期才炸"；
+            // 空列表则是"会话开了但一格没封"——静默的没用配置。
+            if (sealBlock == null) {
+                throw new IllegalArgumentException("arena spec needs a non-null sealBlock");
+            }
+            if (sealOffsets == null || sealOffsets.isEmpty()) {
+                throw new IllegalArgumentException("arena spec needs at least one seal offset");
+            }
             graceTicks = ArenaBounds.graceTicksOr(graceTicks, ArenaBounds.DEFAULT_GRACE_TICKS);
             warnEveryTicks = ArenaBounds.warnEveryTicksOr(warnEveryTicks, ArenaBounds.DEFAULT_WARN_EVERY_TICKS);
             boundRadiusXZ = ArenaBounds.radiusOr(boundRadiusXZ, ArenaBounds.DEFAULT_RADIUS_XZ);
@@ -87,6 +96,14 @@ public final class ArenaSession {
     private Vec3 entryPoint; // 团灭弹回点：开战瞬间的首位参战者位置
     @Nullable
     private Vec3 home;       // Boss 复位点
+    /**
+     * 这一局的封路发生在哪个维度（轮 24 P2-D2）。<b>{@code long} 坐标跨维度同号</b>——
+     * 没有这个键，Boss 换维度之后 {@code hasChunkAt(pos)} 问的是另一个世界的同一坐标，
+     * 那一块大概率是加载的，于是追偿会把上一维度的原方块写进当前维度：静默改错世界，
+     * 而原来那格还继续扣着封印方块。
+     */
+    @Nullable
+    private String sealDimension = null;
 
     public ArenaSession(ColossusBossEntity boss, Spec spec) {
         this.boss = boss;
@@ -105,6 +122,15 @@ public final class ArenaSession {
     /** 开战（ACTIVATED 的上升沿调用）。 */
     public void begin(ServerLevel level) {
         if (active) return;
+        // 上一局欠着的账先结清（轮 24 P3-D3）：sealOffsets 与上一局同源、Boss 又回到 home，
+        // 直接开新局会在同一格上撞键——而"先放后记"会把刚放下去的封印方块当成"原方块"记进快照。
+        if (!sealSnapshot.isEmpty()) {
+            Colossus.LOGGER.warn("boss {} starts a new arena session with {} seal entr(y) still unrestored"
+                            + " - settling the old debt first",
+                    boss.getBossId(), sealSnapshot.size());
+            applySeal(level, false);
+        }
+        this.sealDimension = level.dimension().location().toString();
         active = true;
         home = boss.position();
         var ps = boss.engagement().participants(level.getServer());
@@ -125,10 +151,7 @@ public final class ArenaSession {
      */
     public void tick(ServerLevel level) {
         if (!active) {
-            // 会话结束了但还有没还回去的封路块（那一格当时区块没加载）——**继续追**，
-            // 不然"胜利/团灭那一 tick 正好没加载"就把一堵黑曜石永久留在玩家世界里，
-            // 而且原先是"调过 setBlock 就删账"，连追的机会都没有（第三十六批）。
-            if (!sealSnapshot.isEmpty()) applySeal(level, false);
+            pumpRestoreOnly(level); // 会话结束了但账没结清 ⇒ 继续追（理由见该方法）
             return;
         }
         var server = level.getServer();
@@ -211,6 +234,43 @@ public final class ArenaSession {
         boss.sendBossVisualEvent("colossus:arena_fail");
     }
 
+    /**
+     * <b>只做一件事</b>：把还没还回去的封路块试着还掉，别的都不做。
+     *
+     * <p>为什么不复用 {@link #tick(ServerLevel)} 里那条分支（轮 24 P2-D1）：胜利那条路是
+     * {@code resolveDeath → victory()}，而 {@code deathPending} 一直保持到原版 remove；
+     * 实体 {@code aiStep} 在 {@code deathPending} 那道 return 之前就 return 了，根本走不到
+     * {@code tickSessionAndSquad} ⇒ 上一批加的"会话结束后继续追偿"在胜利这条路上一次都跑不到，
+     * 欠着的快照随实体一起消失、黑曜石永久留在玩家世界里。第三十六批的注释说"那道门拆了"，
+     * 拆的是第二道（{@code isActive}），第一道在这里——这个入口就是补那第一道。
+     */
+    /**
+     * 测试专用：让<b>下一次</b>解封故意欠一格（区块没加载这件事在 GameTest 里造不出来——
+     * 结构范围内总是加载的，而 D-1 的现场恰恰是"欠着一格 + Boss 正在死亡"）。
+     * 有了这个缝，那条路径第一次能被写成会红的判据；不设它就只能"我相信修好了"。
+     */
+    private boolean debugDeferNextRestore = false;
+    /** 这个缝真的让它欠下过几格（判据要能证明"故意欠账"这一步发生过，否则整条桩会退化成旧测试）。 */
+    private int debugDeferredCount = 0;
+
+    public void debugDeferNextRestore() {
+        this.debugDeferNextRestore = true;
+    }
+
+    /** 被测试缝故意欠下的次数。 */
+    public int debugDeferredCount() {
+        return this.debugDeferredCount;
+    }
+
+    public void pumpRestoreOnly(ServerLevel level) {
+        if (this.active || sealSnapshot.isEmpty()) return;
+        applySeal(level, false);
+    }
+
+    /** 封路是在哪个维度封的（追偿前的维度对账用；{@code null}＝本会话还没封过）。 */
+    @Nullable
+    public String sealDimension() { return this.sealDimension; }
+
     /** 胜利（resolveDeath 时调用）：只解封，不复活。 */
     public void victory(ServerLevel level) {
         if (!active) return;
@@ -231,19 +291,28 @@ public final class ArenaSession {
     private void applySeal(ServerLevel level, boolean seal) {
         String who = String.valueOf(boss.getBossId());
         if (!seal) {
+            String dimNow = level.dimension().location().toString();
             for (var e : new ArrayList<>(sealSnapshot.entrySet())) {
                 // <b>先问区块，再动手</b>（v14 取证 B 节：TF 1.20.1 七个 Boss 在写封印方块前
                 // 固定跑 {@code isRestrictionPointValid(dim) && level().isLoaded(pos)} 双短路；
                 // 而本仓此前<b>一次 isLoaded 都没有</b>）。服务端 {@code setBlock/getBlockState}
                 // 对缺失区块会<b>强制生成</b>，这件事发生在 Boss 的 tick 里。
-                if (!ArenaBounds.worldReady(level.hasChunkAt(e.getKey()))) {
+                if (this.debugDeferNextRestore) {
+                    this.debugDeferNextRestore = false;
+                    this.debugDeferredCount++;
+                    continue; // 故意留着这条账：与"区块没加载"走的是同一条不删账路径
+                }
+                boolean sameDim = sealDimension == null || sealDimension.equals(dimNow);
+                if (!ArenaBounds.restoreAllowed(sameDim, level.hasChunkAt(e.getKey()))) {
                     // 没加载就<b>不删账</b>：交给 tick() 开头那条"会话已结束但快照非空"的追偿路径。
                     // 旧写法是"调过 setBlock 就 remove"，于是一次没加载＝方块永久留在世界里，
                     // 连重试的机会都被删掉了。
                     if (OncePerKey.firstTime(who + "|arena-restore")) {
-                        Colossus.LOGGER.warn("arena restore deferred: chunk at {} not loaded yet, "
-                                        + "keeping {} snapshot entr(y) (boss {})",
-                                e.getKey().toShortString(), sealSnapshot.size(), boss.getBossId());
+                        Colossus.LOGGER.warn("arena restore deferred at {} in {} ({}): keeping {}"
+                                        + " snapshot entr(y) until it can be settled (boss {})",
+                                e.getKey().toShortString(), dimNow,
+                                sameDim ? "chunk not loaded" : "wrong dimension - boss moved?",
+                                sealSnapshot.size(), boss.getBossId());
                     }
                     continue;
                 }
@@ -278,6 +347,16 @@ public final class ArenaSession {
                     continue;
                 }
                 default -> {
+                    // 同一格第二次封跳过（轮 24 P3-D3）：两条不同 Vec3 取整后可以落进同一格，
+                    // 而"先放后记"会把上一格刚放下去的封印方块当成原方块记账 ⇒
+                    // 解封时把封印还原成封印，原方块永久丢失。
+                    if (ArenaBounds.slotAlreadySealed(sealSnapshot.containsKey(pos.immutable()))) {
+                        if (OncePerKey.firstTime(who + "|arena-dup")) {
+                            Colossus.LOGGER.warn("arena seal offsets collide on {} - second one skipped"
+                                    + " (boss {})", pos.toShortString(), boss.getBossId());
+                        }
+                        continue;
+                    }
                     sealSnapshot.put(pos.immutable(), level.getBlockState(pos));
                     level.setBlock(pos, spec.sealBlock().defaultBlockState(), Block.UPDATE_ALL);
                 }
@@ -299,6 +378,7 @@ public final class ArenaSession {
         if (entryPoint != null) {
             tag.putDouble("entry_x", entryPoint.x); tag.putDouble("entry_y", entryPoint.y); tag.putDouble("entry_z", entryPoint.z);
         }
+        if (sealDimension != null) tag.putString("seal_dim", sealDimension);
         ListTag snapshot = new ListTag();
         for (var e : sealSnapshot.entrySet()) {
             CompoundTag entry = new CompoundTag();
@@ -317,6 +397,7 @@ public final class ArenaSession {
         // 而 {@code getDouble} 对类型不对的键也是回 0（它内部走 mask=99 宽读数值、不认字符串）。
         // 存在性判据必须用 {@code TAG_ANY_NUMERIC=99}（{@code Tag.java:24}）：用具体类型号会比
         // 读取端更严，把"存成 Int 的合法存档"判成缺键＝整段边界静默失效（本仓已踩过三次）。
+        sealDimension = tag.contains("seal_dim", Tag.TAG_STRING) ? tag.getString("seal_dim") : null;
         home = readTriple(tag, "home_x", "home_y", "home_z", "home");
         entryPoint = readTriple(tag, "entry_x", "entry_y", "entry_z", "entry");
         ListTag snapshot = tag.getList("seal_snapshot", Tag.TAG_COMPOUND);

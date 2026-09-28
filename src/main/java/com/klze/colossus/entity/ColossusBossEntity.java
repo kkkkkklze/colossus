@@ -666,6 +666,11 @@ public abstract class ColossusBossEntity extends Monster {
         tickMusic(server);
         tickScaling(server);
 
+        // 封路欠账<b>必须跑在这道 return 之前</b>（轮 24 P2-D1）：胜利解封发生在 resolveDeath 里，
+        // 而 deathPending 一直保持到原版 remove。放在下面 tickSessionAndSquad 里的追偿一次都到不了，
+        // 快照会随实体一起消失。这里只还账，不做越界/团灭那几件事（见 ArenaSession.pumpRestoreOnly）。
+        if (this.arena != null) this.arena.pumpRestoreOnly(server);
+
         if (this.deathPending || this.stateController.isTransitioning()) return;
 
         this.tickShieldRegen(server);

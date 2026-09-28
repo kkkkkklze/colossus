@@ -62,8 +62,17 @@ public final class TailLedger {
      */
     public static final int MAX_EMISSIONS = 128;
 
-    /** 被拒入账的次数（轮 23 P3-5）：{@code retire} 说真话，账本自己得能把这句真话<b>数出来</b>。 */
-    private int rejectedBookings = 0;
+    /**
+     * <b>真低报</b>的次数：本来有余晖可记，却因为溢出逐出没记上（轮 23 P3-5 要的报警对象就是它）。
+     */
+    private int evictedBookings = 0;
+    /**
+     * "退休时压根没有发射事实"的次数（轮 24 P3-B2）：几何档（{@code ring}）一生都不撒粒子、
+     * 整生被距离剔除或被额度饿死的圈也一样——这些都是<b>正常退化的安全侧</b>，不是低报。
+     * 必须分开记：合在一起的话，任何一场用 {@code ring} 的 Boss 战都会让计数器稳定增长，
+     * 将来那个"一次性告警"要么永远不响（加了阈值就漏掉真低报），要么每场都响（没人看）。
+     */
+    private int untrackedRetirements = 0;
 
     /**
      * 这条圈这一 tick 真的撒了 {@code rate} 个（记账的事实来源，不记就等于没有余晖）。
@@ -124,13 +133,14 @@ public final class TailLedger {
      * 在重新入库那一点做（{@code TelegraphClient} 的 put 前），一个职责一个入口
      * （轮 20 P1-1 拆"一名两义"的同一口径，不许在这里合回去）。
      *
-     * @return 是否真的生成/替换了一条尾段（false＝没账可记，或记上就被溢出逐出；两种都计入
-     *         {@link #rejectedBookings()}，否则"低报发生过"这件事至今不可观测——轮 23 P3-5）
+     * @return 是否真的生成/替换了一条尾段（false＝没账可记或记上被逐出；两类分别计入
+     *         {@link #untrackedRetirements()} 与 {@link #evictedBookings()}，
+     *         否则"低报发生过"这件事至今不可观测——轮 23 P3-5）
      */
     public boolean retire(long mirrorKey, int particleLife) {
         long[] em = emissions.remove(mirrorKey);
         if (em == null) {
-            rejectedBookings++; // "根本没记上"也计数：低报必须至少可观测
+            untrackedRetirements++; // 没有发射事实＝没有余晖可记：良性，不算低报（轮 24 P3-B2）
             return false;
         }
         // 窗口＝真发射过的那些 tick，右端开区间（与 tailAlive 的 [start,end) 口径一致）
@@ -138,13 +148,21 @@ public final class TailLedger {
     }
 
     /**
-     * 被拒入账／被逐出的次数（轮 23 P3-5）。{@code retire} 的返回值今天有两个调用点，
-     * 两处都把真话<b>丢掉</b>（裸调用），于是"低报"仍然只有 {@code colossusSelfTest} 看得见。
-     * 这个计数器是给客户端一次性告警与 F3 调试面用的观测口——没有它，2-A 那一类故障
-     * 连"发生过"都无法证明。
+     * <b>真低报</b>：本来有账可记却被溢出逐出的次数（轮 23 P3-5）。{@code retire} 的返回值今天在
+     * 两个调用点都被<b>丢掉</b>（裸调用），所以这个计数器是唯一的观测口——
+     * 客户端的一次性告警与 F3 调试面都该读它。
      */
-    public int rejectedBookings() {
-        return rejectedBookings;
+    public int evictedBookings() {
+        return this.evictedBookings;
+    }
+
+    /**
+     * 退休时<b>没有发射事实</b>的次数（良性：几何档一生不撒粒子、整生被距离剔除、整生被额度饿死）。
+     * 与 {@link #evictedBookings()} 分开记是轮 24 P3-B2 的要求——合起来的话，任何一场用 {@code ring}
+     * 的 Boss 战都会让它稳定增长，那个"一次性告警"要么永远不响、要么每场都响。
+     */
+    public int untrackedRetirements() {
+        return this.untrackedRetirements;
     }
 
     /** 仅供测试/诊断：这条圈有尾段在账上吗（轮 21 P2-4：逐出策略必须有能断言的口子）。 */
@@ -172,10 +190,10 @@ public final class TailLedger {
      * 让入账点自己说。
      */
     private boolean book(long mirrorKey, int rate, int particleLife, long start, long end) {
-        if (rate <= 0 || end <= start) {
-            rejectedBookings++; // 率非正／窗口零长：这一条低报发生了（轮 23 P3-5）
-            return false;
-        }
+        // 这条守卫今天**不可达**（轮 24 P3-B1）：rate 只可能来自 noteEmission（那里已挡过 rate<=0），
+        // 而 end - start = 末次发射 - 首次发射 + 1 >= 1 恒成立。留着它是私有方法的**不变量守卫**，
+        // 不是第三类低报——所以这里不计数，否则计数器又多一个"看着像事实、其实进不来"的口径。
+        if (rate <= 0 || end <= start) return false;
         entries.put(mirrorKey, new Tail(rate, particleLife, start, end));
         while (entries.size() > MAX_ENTRIES) {
             // 逐出走 end 最大（衰减最慢＝占账最久）的那条。哨兵用 found 标志而不是 -1L
@@ -197,7 +215,7 @@ public final class TailLedger {
         // <b>入账之后还要看它有没有被这一批的溢出逐出</b>：新来的那条如果 end 最大，
         // 上面那个 while 会立刻把它自己丢掉——那时说"记上了"就是第二次说谎（轮 22 P3-5 的同一处）。
         boolean stays = entries.containsKey(mirrorKey);
-        if (!stays) rejectedBookings++; // 记上又被逐出＝同样没占账
+        if (!stays) evictedBookings++; // 记上又被溢出逐出＝真没占账，这一类才值得报警
         return stays;
     }
 
@@ -236,6 +254,7 @@ public final class TailLedger {
     public void clear() {
         entries.clear();
         emissions.clear(); // 两级一起清：换维度/登出后连"真发射过什么"都不该留
-        rejectedBookings = 0; // 观测计数器也跟着新粒子系统重新开始（不清就会把上一维度的低报算进来）
+        evictedBookings = 0;      // 两个观测计数器跟着新粒子系统重新开始——
+        untrackedRetirements = 0; // 不清就会把上一维度/上一局的账算到这一局头上
     }
 }
