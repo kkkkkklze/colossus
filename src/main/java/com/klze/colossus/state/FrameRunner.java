@@ -211,16 +211,9 @@ public final class FrameRunner<C> {
      * @return {@code null}＝已续播；否则给出一条能直接进日志的拒绝理由（状态<b>未</b>被改动）
      */
     public String resumeFrom(int tickAt, long bitmap, long savedDigest) {
-        if (savedDigest != this.framesDigest) {
-            return "frame table digest " + Long.toHexString(savedDigest)
-                    + " does not match the current move's " + Long.toHexString(this.framesDigest)
-                    + " (the move's frame list changed since the save; refusing to replay it by index)";
-        }
-        int n = frames.size();
-        if (n < MAX_PERSISTABLE_FRAMES && (bitmap & (-1L << n)) != 0L) {
-            return "bitmap " + bitmap + " carries bits above the " + n
-                    + "-entry frame table (a shifted bit aliases onto entry 0; treating the snapshot as corrupt)";
-        }
+        String bad = digestGate(savedDigest, this.framesDigest);
+        if (bad == null) bad = bitGate(bitmap, frames.size());
+        if (bad != null) return bad;
         this.lastTick = Math.max(tickAt, this.lastTick); // 绝不允许倒退：倒退会重放整段窗口
         for (int i = 0; i < frames.size(); i++) {
             Frame<C> f = frames.get(i);
@@ -236,6 +229,24 @@ public final class FrameRunner<C> {
             this.fired[i] = this.fired[i] || passed || claimed;
         }
         return null;
+    }
+
+    /**
+     * 只缴械、不续播：<b>把 {@code tickAt} 之前（含）已经过了窗口起点的一次性帧全部记成已消费</b>，
+     * 位图与指纹一概不看。
+     *
+     * <p>它是"续播失败时的安全侧兜底"：{@link #resumeFrom} 被拒（指纹不符／越界位）之后，
+     * 如果调用方还是带着这份旧时间线跑下去，{@code advance} 会<b>把整招已经打过的帧重放一遍</b>
+     * （存档错一位＝白挨一刀，只是这次是整发）。宁可让这一发<b>少打几帧</b>（掉帧＝玩家少挨一刀，
+     * 与全类"不补偿"的口径同向），也不让它重放。持续帧不参与（位图对它没意义，出不出帧只看 tick）。
+     */
+    public void disarmUpTo(int tickAt) {
+        for (int i = 0; i < frames.size(); i++) {
+            Frame<C> f = frames.get(i);
+            if (f.repeating()) continue;
+            if (f.from() <= tickAt) this.fired[i] = true;
+        }
+        this.lastTick = Math.max(tickAt, this.lastTick);
     }
 
     /**
@@ -274,6 +285,50 @@ public final class FrameRunner<C> {
      *
      * @return null＝可以续播；否则给出一条能直接进日志的理由
      */
+    /** 指纹闸（纯函数）：存档里那份帧表与眼前这张是不是<b>同一张</b>。 */
+    public static String digestGate(long savedDigest, long actualDigest) {
+        if (savedDigest != actualDigest) {
+            return "frame table digest " + Long.toHexString(savedDigest)
+                    + " does not match the current move's " + Long.toHexString(actualDigest)
+                    + " (the move's frame list changed since the save; refusing to replay it by index)";
+        }
+        return null;
+    }
+
+    /**
+     * 越界位闸（纯函数）：位图里不许有"这张表根本没有的位"。
+     *
+     * <p>{@code 1L << i} 的移位是模 64 的，所以 {@code n < 64} 时第 n 位以上一旦被置上，
+     * 要么来自被改过的存档（整招缴械），要么来自一张<b>比这张表更长</b>的旧帧表——
+     * 两种都不该照单全收。{@code n == 64} 必须让路：{@code -1L << 64} 会别名回 {@code -1L << 0}，
+     * 不让路就会把合法的满宽位图判成损坏。
+     */
+    public static String bitGate(long bitmap, int frameCount) {
+        if (frameCount < MAX_PERSISTABLE_FRAMES && (bitmap & (-1L << frameCount)) != 0L) {
+            return "bitmap " + bitmap + " carries bits above the " + frameCount
+                    + "-entry frame table (a shifted bit aliases onto entry 0; treating the snapshot as corrupt)";
+        }
+        return null;
+    }
+
+    /**
+     * 续播前的<b>完整</b>作废判据：时长侧（{@link #resumeRejection(int, int, int)}）
+     * + 指纹侧 + 位图侧，三道闸一次问清，调用方不必自己拼顺序。
+     *
+     * <p>为什么必须有这个合口径的版本（第三十八批）：实体侧要在<b> push 之前</b>决定
+     * "续播还是落 idle"，而 {@link #resumeFrom} 是<b>会改状态</b>的方法——把它的判据在调用方
+     * 重写一遍，就是"两处规则互相指认"的老病。
+     */
+    public static String resumeRejection(int stateTick, int durationTicks, int elapsedTicksWhileLoaded,
+                                         long bitmap, int frameCount,
+                                         long savedDigest, long actualDigest) {
+        String bad = digestGate(savedDigest, actualDigest);
+        if (bad != null) return bad;
+        bad = bitGate(bitmap, frameCount);
+        if (bad != null) return bad;
+        return resumeRejection(stateTick, durationTicks, elapsedTicksWhileLoaded);
+    }
+
     public static String resumeRejection(int stateTick, int durationTicks, int elapsedTicksWhileLoaded) {
         if (durationTicks < 1) return "duration " + durationTicks + ": non-positive, nothing to resume";
         if (stateTick < 0) return "stateTick " + stateTick + ": negative";

@@ -37,6 +37,25 @@ public final class StateController<E> {
         return true;
     }
 
+    /**
+     * 续播式压栈：栈顶从 {@code startTick}（存档里的"最后一次已执行逻辑帧"）起算，
+     * 于是本控制器的第一次 {@code advance} 把它送到 {@code startTick + 1}——
+     * <b>接着没断过的那条时间线继续走</b>，帧表也不会重放已消费的帧
+     *（位图由 {@code AttackState} 在 {@code onStart} 里交给 {@code resumeFrom}）。
+     *
+     * <p>与 {@link #pushWithTransition} 的区别必须说清，因为两者都直接调 {@code begin} 而语义相反：
+     * 那条是<b>负</b>起点（动画先行、逻辑还没开跑），这条是<b>正</b>起点（逻辑已经跑过一段）。
+     * 不复用一个入口是轮 20 那条"一名两义"教训的直接应用。
+     */
+    public boolean pushResumed(State<E> state, int startTick) {
+        ActiveState<E> top = stack.peek();
+        if (top != null && !top.state().isInterruptable(entity)) {
+            return false;
+        }
+        begin(state, Math.max(0, startTick));
+        return true;
+    }
+
     /** 压入并预留 transitionTicks 的转场窗口（tick 从 -transitionTicks 起算）。 */
     public boolean pushWithTransition(State<E> state, int transitionTicks) {
         ActiveState<E> top = stack.peek();

@@ -301,6 +301,87 @@ public class ColossusGameTests {
     }
 
     /**
+     * 帧时间线的存档续播（第三十八批，快照第二半）。四条判据都是<b>行为级</b>的，不看实现内部：
+     * ① 在途招式的四个键必须齐（缺任一个都没法安全续播）；
+     * ② 合法快照续播后<b>从断点之后继续</b>（招内 tick 不回 0），并一路跑到整招结束；
+     * ③ 指纹被改过一个字节都不许续——整份作废、落 idle（旧位图按新帧表解释＝把伤害帧扣到别的帧上）；
+     * ④ 拒播必须留下可读的原因（{@code lastResumeRefusal}），不然运维只看得到"Boss 站着不动"。
+     *
+     * <p>为什么用实例上的观测面而不是掉血量当判据：参战者会被别的桩的残兵碰脏（轮 7 实测同一份代码
+     * 两轮分别掉 8.0 / 10.0 点），掉血只能证"打到了"，证不了"没重放"。
+     */
+    @GameTest(template = YARD, timeoutTicks = 500, batch = "timeline-resume")
+    public void timelineSnapshotResumesAcrossLoadAndRefusesAForeignDigest(GameTestHelper helper) {
+        ColossusBossEntity boss = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                new BlockPos(4, 3, 4));
+        var sweepId = new net.minecraft.resources.ResourceLocation("colossus", "sweep");
+        helper.assertTrue(boss.forceMove(sweepId), "sweep 应能强制起手（它是无阶段要求的招）");
+        var move = boss.moveSet().byId(sweepId);
+        helper.assertTrue(move != null, "示范 Boss 的招式表里必须有 sweep");
+
+        helper.runAfterDelay(6, () -> {
+            var tag = new net.minecraft.nbt.CompoundTag();
+            boss.saveWithoutId(tag);
+            helper.assertTrue(tag.contains(ColossusBossEntity.KEY_STATE_MOVE, net.minecraft.nbt.Tag.TAG_STRING)
+                            && tag.contains(ColossusBossEntity.KEY_STATE_TICK, net.minecraft.nbt.Tag.TAG_ANY_NUMERIC)
+                            && tag.contains(ColossusBossEntity.KEY_FRAMES_FIRED, net.minecraft.nbt.Tag.TAG_ANY_NUMERIC)
+                            && tag.contains(ColossusBossEntity.KEY_FRAMES_DIGEST, net.minecraft.nbt.Tag.TAG_ANY_NUMERIC),
+                    "在途招式必须把 (招名, 招内 tick, 位图, 指纹) 四个键一起写进存档");
+            int savedTick = tag.getInt(ColossusBossEntity.KEY_STATE_TICK);
+            long savedDigest = tag.getLong(ColossusBossEntity.KEY_FRAMES_DIGEST);
+            helper.assertTrue(savedTick > 0 && savedTick < move.duration(),
+                    "招内 tick 应落在 (0, duration) 内，实际 " + savedTick + "/" + move.duration());
+            helper.assertTrue(savedDigest == move.framesDigest(),
+                    "写进去的指纹必须等于当前招式的 framesDigest()");
+
+            // ③ 指纹被改 ⇒ 整份作废
+            var tampered = tag.copy();
+            tampered.putLong(ColossusBossEntity.KEY_FRAMES_DIGEST, savedDigest ^ 0x5555L);
+            ColossusBossEntity wrong = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                    new BlockPos(20, 3, 20));
+            wrong.load(tampered);
+            helper.runAfterDelay(3, () -> {
+                helper.assertTrue(wrong.lastResumeRefusal() != null
+                                && wrong.lastResumeRefusal().contains("digest"),
+                        "指纹不符必须拒播并在原因里说清是哪一道闸，实际 " + wrong.lastResumeRefusal());
+                helper.assertTrue(wrong.getStateController().isIdle(),
+                        "拒播之后要老实落 idle，而不是硬播一份错位的时间线");
+
+                // ② 合法快照 ⇒ 从断点继续，一路跑到整招结束
+                boss.discard();
+                ColossusBossEntity revived = helper.spawn(ColossusRegistries.EXAMPLE_COLOSSUS.get(),
+                        new BlockPos(4, 3, 4));
+                revived.load(tag);
+                helper.runAfterDelay(2, () -> {
+                    helper.assertTrue(revived.lastResumeRefusal() == null,
+                            "合法快照不该被拒，实际原因：" + revived.lastResumeRefusal());
+                    var active = revived.getStateController().active();
+                    helper.assertTrue(active != null && active.tick() > savedTick,
+                            "续播必须从断点之后接着走（saved " + savedTick + "，实际 "
+                                    + (active == null ? "idle" : active.tick()) + "）");
+                    // 判据取"这一发自己结束了没有"，不取"栈是不是空的"（首跑假红的根因）：
+                    // Boss 打完续出来的这招会**合法地再选下一招**，栈非空是常态而不是卡死——
+                    // 原先那条 isIdle() 断的是"这段时间里没人出招"，测的根本不是续播。
+                    final var resumedState = active;
+                    helper.runAfterDelay(move.duration() + 4, () -> {
+                        var stack = revived.getStateController().snapshot();
+                        boolean finished = true;
+                        for (var a : stack) {
+                            if (a == resumedState) { finished = false; break; }
+                        }
+                        var late = revived.getStateController().active();
+                        helper.assertTrue(finished,
+                                "续出来的这一发必须跑到整招结束（还在栈上＝卡住；当前栈顶 "
+                                        + (late == null ? "idle" : late.state().name() + "@" + late.tick())
+                                        + "，招内长度 " + move.duration() + "）");
+                        succeedClean(helper, revived, wrong);
+                    });
+                });
+            });
+        });
+    }
+
+    /**
      * squad 身份账回归（第八批 P1 防重现桩 + 第九批成员基类接线）。
      *
      * <p>判别式设计：旧写法用 {@code AABB inflate(96)} 扫场认身份，所以<b>任何一次"当下查不到人"</b>

@@ -49,6 +49,7 @@ public final class StateSelfTest {
         MoveJsonSelfTest.run((name, ok) -> check(name, ok));
         testDeferredWorkData();
         testArenaBounds();
+        testTimelineFingerprint();
         if (failures > 0) {
             System.out.println("SELFTEST FAILED: " + failures + "/" + checks);
             System.exit(1);
@@ -600,6 +601,54 @@ public final class StateSelfTest {
      * 里——那个类 import MC，四条门里只有 {@code runGameTestServer} 碰得到它，而它需要一个活世界
      * 加活区块，所以"配一个坏半轴就把玩家每 tick 弹来弹去"这类故障<b>没有任何门能提前看见</b>。
      */
+    /**
+     * 帧表指纹与位图越界闸（第三十八批，快照第二半的前置）。
+     * 这一族必须在纯 JVM 里钉死：接进 NBT 之后，"该拒的没拒"就是<b>整招永久静音</b>，
+     * "不该拒的拒了"就是每次读档丢掉一发正在放的招——两边都没有运行期日志可看。
+     */
+    private static void testTimelineFingerprint() {
+        // ①指纹只认帧序，不认回调对象：同样的 (from,to,period) 序列必须同值，
+        //   增删一帧或改一个窗口都必须换值（否则 datapack 重载后旧位图会被按新表解释）。
+        var a1 = FrameRunner.<List<Integer>>builder().at(3, (c, t) -> { }).at(9, (c, t) -> { }).build();
+        var a2 = FrameRunner.<List<Integer>>builder().at(3, (c, t) -> { }).at(9, (c, t) -> { }).build();
+        var b1 = FrameRunner.<List<Integer>>builder().at(3, (c, t) -> { }).at(9, (c, t) -> { }).at(15, (c, t) -> { }).build();
+        var c1 = FrameRunner.<List<Integer>>builder().at(9, (c, t) -> { }).at(3, (c, t) -> { }).build();
+        boolean digestDomain = a1.framesDigest() == a2.framesDigest()
+                && a1.framesDigest() != b1.framesDigest()      // 多一帧 ⇒ 变
+                && a1.framesDigest() != c1.framesDigest()      // 换注册序 ⇒ 变（位图下标就是注册序）
+                && FrameRunner.digestOf(java.util.List.<FrameRunner.Frame<Integer>>of())
+                        != a1.framesDigest();
+        check("the frame-table digest ignores callbacks but reacts to an added frame and to reordering",
+                digestDomain);
+
+        // ②越界位闸：n=2 时第 2 位以上不属于这张表；64 帧满宽必须放行（`-1L << 64` 会别名回 `<< 0`）
+        boolean bitGate = FrameRunner.bitGate(0b11L, 2) == null
+                && FrameRunner.bitGate(0b100L, 2) != null
+                && FrameRunner.bitGate(-1L, 2) != null
+                && FrameRunner.bitGate(-1L, 64) == null
+                && FrameRunner.bitGate(0L, 0) == null;         // 空表：0 位不算越界
+        check("the foreign-bit gate rejects bits above the table but lets a full 64-entry bitmap through",
+                bitGate);
+
+        // ③合口径的作废判据：指纹、位图、长度三侧各能独立拒；顺序不能反（指纹不符时不该再谈长度）
+        long d = a1.framesDigest();
+        boolean composite = FrameRunner.resumeRejection(1, 20, 0, 0b11L, 2, d ^ 1L, d) != null
+                && FrameRunner.resumeRejection(1, 20, 0, 0b100L, 2, d, d) != null
+                && FrameRunner.resumeRejection(25, 20, 0, 0b11L, 2, d, d) != null
+                && FrameRunner.resumeRejection(1, 20, 0, 0b11L, 2, d, d) == null;
+        check("the composite refusal gates on digest, then foreign bits, then timeline length", composite);
+
+        // ④disarmUpTo 是"续播被拒时的安全侧兜底"：已过窗口的帧全部记成已消费（绝不重放），
+        //   但窗口还没到的帧照常保留——两头都要钉，否则它会变成一个"整招静音"的开关。
+        List<Integer> fired = new ArrayList<>();
+        var disarmed = FrameRunner.<List<Integer>>builder()
+                .at(3, (c, t) -> c.add(t)).at(9, (c, t) -> c.add(t)).at(20, (c, t) -> c.add(t)).build();
+        disarmed.disarmUpTo(10);
+        for (int t = 1; t <= 25; t++) disarmed.advance(fired, t);
+        check("disarmUpTo mutes frames whose window already passed and keeps future frames alive",
+                fired.equals(List.of(20)) && disarmed.firedBitmap() != 0L);
+    }
+
     private static void testArenaBounds() {
         double def = com.klze.colossus.env.ArenaBounds.DEFAULT_RADIUS_XZ;
         // ①坏半轴一律回默认，且<b>回出来的值必须仍然 >0</b>——这条才是"防弹跳风暴"的真判据：

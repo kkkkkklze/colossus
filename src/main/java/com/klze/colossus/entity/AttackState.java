@@ -13,17 +13,51 @@ import com.klze.colossus.state.State;
 public final class AttackState implements State<ColossusBossEntity> {
 
     private final MoveDef move;
+    /** {@code -1}＝正常起手；{@code >=0}＝从存档的"最后一次已执行逻辑帧"续播（第三十八批）。 */
+    private final int resumeTickAt;
+    private final long resumeBitmap;
     private FrameRunner<ColossusBossEntity> runner;
+    /** 续播被判拒的理由（null＝没被拒）。走到这一支说明<b>实体侧的预检漏了</b>，是缺陷现场不是常态。 */
+    private String resumeRejection;
 
     public AttackState(MoveDef move) {
+        this(move, -1, 0L);
+    }
+
+    /**
+     * 续播式构造：{@code tickAt}＝存档里的"最后一次已执行逻辑帧"，{@code bitmap}＝当时的已触发位图。
+     * 两者都必须先过 {@link FrameRunner#resumeRejection(int, int, int, long, int, long, long)}
+     * 再进来——{@code onStart} 里拒不掉（那时状态已经入栈），只能兜底缴械。
+     */
+    public AttackState(MoveDef move, int tickAt, long bitmap) {
         this.move = move;
+        this.resumeTickAt = tickAt;
+        this.resumeBitmap = bitmap;
     }
 
     public MoveDef move() { return move; }
 
+    /** 当前已触发位图（存档侧要把它写进 NBT；{@code onStart} 之前为 0）。 */
+    public long timelineBitmap() { return this.runner == null ? 0L : this.runner.firedBitmap(); }
+
+    /** 续播被拒的理由；正常起手或续播成功都是 null。 */
+    public String resumeRejection() { return this.resumeRejection; }
+
     @Override
     public void onStart(ColossusBossEntity boss) {
         this.runner = move.newRunner();
+        if (this.resumeTickAt >= 0) {
+            String bad = this.runner.resumeFrom(this.resumeTickAt, this.resumeBitmap, move.framesDigest());
+            if (bad != null) {
+                // <b>安全侧兜底，不是常态</b>：拒了也必须把已过窗口的帧记成已消费，
+                // 否则 advance 会把这一发<b>整段重放</b>（存档错一位＝白挨一刀，这里是整发都挨）。
+                // 掉帧（少打）比走帧（多打）温和，与本类"不补偿"的口径同向。
+                this.resumeRejection = bad;
+                this.runner.disarmUpTo(this.resumeTickAt);
+                com.klze.colossus.Colossus.LOGGER.warn("boss {} refused to resume {} at frame {}: {}",
+                        boss.getBossId(), move.id(), this.resumeTickAt, bad);
+            }
+        }
         boss.beginAttack(move);
         com.klze.colossus.anim.ColossusAnims.fireAttackStart(boss, move); // 显示层缝（GL4=triggerAnim）
     }

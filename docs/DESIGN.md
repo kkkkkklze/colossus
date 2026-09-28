@@ -1221,3 +1221,49 @@ v14 B 节说"TF 1.20.1 在写封印方块前固定跑 `isRestrictionPointValid(d
 
 验证：build（`-Pgecko`）+ 自检 **157/157** + `gameTestAudit: 15 @GameTest declared (floor 15) OK` +
 `runGameTestServer` **All 15 required tests passed**（两轮）+ 两个 jar 的 `META-INF/LICENSE` 回读为 True。
+
+---
+
+## 第三十八批（快照第二半接线：在途招式真的能穿过存档了）
+
+轮 22/23 都记着同一条 ⬜——"三个原语齐备但生产路径完全碰不到"。这批把它接上：
+**`colossus_state_move` / `colossus_state_tick` / `colossus_frames_fired` / `colossus_frames_digest`
+四键写入 + 首个 `aiStep` 消费**，读档后在途招式从断点继续，而不是回 idle 重选。
+
+### 接线的形状（以及为什么每个零件都长这样）
+
+- **存**：只在 `activeState.tick() > 0` 且栈顶是 `AttackState` 时写四键——tick 0/负值是转场窗口，
+  那里"已消费位图"还没有意义。
+- **读**（`readNbt` 只暂存，不动状态机）：四键齐 + 数值型存在性判据用 `Tag.TAG_ANY_NUMERIC=99`。
+  只看第一个键在不在 ⇒ 位图会静默读成 **0＝"整招一帧没打"**，重载后把已经落过的伤害帧**再落一遍**。
+- **应用**（首个 `aiStep`，与 `resumeDeathPending` 同一处）：那时招式表与注册表才就绪。
+  四道判据按序：招名还能解析 ⇒ 栈是空的 ⇒ `FrameRunner.resumeRejection`（指纹→越界位→长度）
+  ⇒ `pushResumed` 成功。任一不过就落 idle，并把原因留在 **`lastResumeRefusal()`**——
+  运维只看得到"Boss 站着不动"，那句"为什么"必须是可读的观测面。
+- **新入口 `StateController.pushResumed(state, startTick)`**：与 `pushWithTransition` 都调 `begin`，
+  但一个是**负**起点（动画先行）、一个是**正**起点（逻辑跑过一段）——语义相反就不复用一个入口
+  （轮 20"一名两义"的直接应用）。
+- **`disarmUpTo(tickAt)`**：续播被拒时的安全侧兜底——已过窗口的帧全部记成已消费、未来的帧保留。
+  拒了还硬播＝整段重放；掉帧比走帧温和，与全类"不补偿"同向。
+- **已知代价（不藏）**：`onStart` 会重触发一次起手动画 ⇒ 续出来是"动画从头播、逻辑从断点跑"。
+  GL4 没有服务端动画时钟，要动画也连续得让 `anim/` 长出"按进度 seek"的能力（挂账）。
+
+### 判据（自检 157 → 161，GameTest 15 → 16）
+
+`testTimelineFingerprint()` 四条纯判据：指纹**忽略回调对象**但对"多一帧"和"换注册序"都变；
+`bitGate` 的 `n=0 / n=2 / n=64` 三档（满宽必须放行，否则合法位图被误判损坏）；
+合口径 `resumeRejection` 的三道闸各能独立拒、且顺序是"先问这张表还是不是那张表，再谈长度"；
+`disarmUpTo` 两头钉（已过窗口静音 ＋ 未来帧仍活）。
+
+新 GameTest `timelineSnapshotResumesAcrossLoadAndRefusesAForeignDigest`：四键齐、`savedTick` 落在
+`(0, duration)` 内、写进去的指纹等于当前招式的、**指纹异或一个常数 ⇒ 必须拒播且原因里带 digest、
+且老实落 idle**；合法快照 ⇒ 续播后从 `savedTick + …` 继续并跑到整招结束。
+
+**这条桩首跑是假红，根因值得记**：最后一条我原先断的是 `stateController.isIdle()`——
+可 Boss 打完续出来的这招会**合法地再选下一招**（实测栈顶变成 `attack:colossus:datapack_quake@12`）。
+那测的是"这段时间里没人出招"，不是"续播成没成"。改成钉**那一发自己是否离开栈**
+（拿 `ActiveState` 的对象身份比，`snapshot()` 里没有它＝结束了）。与本仓 §4 那一族同源：**判据要钉在
+被保护的事实上，不是钉在一个恰好会跟着变的旁证上。**
+
+验证：build（`-Pgecko`）+ 自检 **161/161** + `gameTestAudit: 16 @GameTest declared (floor 16) OK` +
+`runGameTestServer` **All 16 required tests passed**（两轮）。

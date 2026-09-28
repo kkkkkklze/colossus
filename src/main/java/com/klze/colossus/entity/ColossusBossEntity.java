@@ -15,6 +15,7 @@ import com.klze.colossus.network.ColossusPackets;
 import com.klze.colossus.progress.BossDefinition;
 import com.klze.colossus.progress.BossKillBoard;
 import com.klze.colossus.state.ColossusStateGoal;
+import com.klze.colossus.state.FrameRunner;
 import com.klze.colossus.state.StateController;
 import net.minecraft.core.BlockPos;
 import net.minecraft.nbt.CompoundTag;
@@ -514,6 +515,21 @@ public abstract class ColossusBossEntity extends Monster {
     /** 读档恢复：演出中被卸载的 Boss 重载后在首个 aiStep 续上死亡流程（审查 P1）。 */
     private boolean resumeDeathPending = false;
 
+    /** 时间线快照的四个键（<b>单一定义处</b>：写与读都从这里取，不许两侧各拼一遍字符串）。 */
+    public static final String KEY_STATE_MOVE = "colossus_state_move";
+    public static final String KEY_STATE_TICK = "colossus_state_tick";
+    public static final String KEY_FRAMES_FIRED = "colossus_frames_fired";
+    public static final String KEY_FRAMES_DIGEST = "colossus_frames_digest";
+
+    /** 读档暂存的时间线（真正的续播在首个 {@code aiStep} 做——那时招式表与注册表才就绪）。 */
+    private boolean resumeAttackPending = false;
+    private String pendingMoveName = "";
+    private int pendingStateTick = 0;
+    private long pendingFramesFired = 0L;
+    private long pendingFramesDigest = 0L;
+    /** 最近一次续播<b>没成</b>的原因（诊断与 GameTest 的观测面；{@code null}＝成功或压根没这份存档）。 */
+    private String lastResumeRefusal = null;
+
     private int lastScalePlayers = -1;
     private int scaleCooldown = 0;
     private boolean musicLatch = false;
@@ -630,6 +646,10 @@ public abstract class ColossusBossEntity extends Monster {
             this.resumeDeathPending = false;
             this.stateController.forcePush(new DeathState(this, this.damageSources().generic()));
         }
+        if (this.resumeAttackPending) {
+            this.resumeAttackPending = false; // 只吃一次：拒了也不许每 tick 重试（那会变成日志洪水）
+            this.tryResumeAttack();
+        }
         this.stateController.tick();
         this.drainWork();
         this.tickTelegraphs(); // 轮廓到期只比一个 long，跨过最早 end 才重投快照
@@ -680,6 +700,60 @@ public abstract class ColossusBossEntity extends Monster {
         this.stateController.push(new AttackState(move));
         return true;
     }
+
+    /**
+     * 读档后把在途招式<b>从断掉处续上</b>（第三十八批）。四道判据全过才续，任一不过就落 idle
+     * 并把原因留在 {@link #lastResumeRefusal()}：
+     * <ol>
+     *   <li>招式还在表里（datapack 删了这招 ⇒ 位图连"第几位是什么"都没有意义）；</li>
+     *   <li>栈是空的（别的状态在跑就先让它跑完，续播不插队）；</li>
+     *   <li><b>指纹相符</b>＋位图没有越界位（{@link FrameRunner#resumeRejection} 一次问清）；</li>
+     *   <li>"招内 tick"还没超出整招长度。</li>
+     * </ol>
+     * <b>已知代价（如实标注）</b>：{@code AttackState.onStart} 会重触发一次起手动画——GL4 没有服务端
+     * 动画时钟，续出来的画面是"动画从头播、逻辑从断点跑"。要动画也连续，得让 {@code anim/} 长出
+     * "按进度 seek"的能力，那是另一条线（§7 已挂账）。
+     */
+    private void tryResumeAttack() {
+        this.lastResumeRefusal = null;
+        if (this.pendingMoveName.isEmpty() || !this.stateController.isIdle()) {
+            this.lastResumeRefusal = this.pendingMoveName.isEmpty()
+                    ? "no move name in the save" : "state stack is not idle";
+            return;
+        }
+        ResourceLocation id;
+        try {
+            id = new ResourceLocation(this.pendingMoveName);
+        } catch (RuntimeException malformed) {
+            this.lastResumeRefusal = "move name " + this.pendingMoveName + " is not a resource id";
+            Colossus.LOGGER.warn("boss {} dropped a saved attack: {}", this.getBossId(), this.lastResumeRefusal);
+            return;
+        }
+        MoveDef move = this.moveSet().byId(id);
+        if (move == null) {
+            this.lastResumeRefusal = "move " + id + " is no longer in the table";
+            Colossus.LOGGER.warn("boss {} cannot resume {}: {} (staying idle)",
+                    this.getBossId(), id, this.lastResumeRefusal);
+            return;
+        }
+        String bad = FrameRunner.resumeRejection(this.pendingStateTick, move.duration(), 0,
+                this.pendingFramesFired, move.frames().size(), this.pendingFramesDigest, move.framesDigest());
+        if (bad != null) {
+            this.lastResumeRefusal = bad;
+            Colossus.LOGGER.warn("boss {} refused to resume {} at frame {}: {}",
+                    this.getBossId(), id, this.pendingStateTick, bad);
+            return;
+        }
+        var state = new AttackState(move, this.pendingStateTick, this.pendingFramesFired);
+        if (!this.stateController.pushResumed(state, this.pendingStateTick)) {
+            this.lastResumeRefusal = "state stack refused the resumed attack";
+            Colossus.LOGGER.warn("boss {} could not push the resumed attack {}",
+                    this.getBossId(), id);
+        }
+    }
+
+    /** 最近一次续播为什么没成（诊断与回归桩的观测面；{@code null}＝成功或压根没这份存档）。 */
+    public String lastResumeRefusal() { return this.lastResumeRefusal; }
 
     // ---------------- 阶段闸门 ----------------
 
@@ -1575,6 +1649,17 @@ public abstract class ColossusBossEntity extends Monster {
         tag.putBoolean("colossus_activated", this.isActivated());
         tag.putBoolean("colossus_dying", this.deathPending && !this.deathResolved);
         tag.putLong("colossus_part_bits", this.partBits()); // entityData 不落盘——位图自管持久化
+        // 在途招式的<b>帧时间线</b>落盘（第三十八批，快照第二半；v12a 定的形态：存"招内相对 tick + 位图"，
+        // 不存绝对 gameTime——卸载期间游戏钟照走，存绝对时刻会把一次正常存档判成"这招早该结束"）。
+        // 第四个键是指纹：位图按<b>帧表下标</b>解释每一位，帧序一变（datapack 重载增删一帧）
+        // 就会把旧位图扣到别的帧上，所以读回时必须先验"这张表还是那张表"。
+        var activeState = this.stateController.active();
+        if (activeState != null && activeState.state() instanceof AttackState attack && activeState.tick() > 0) {
+            tag.putString(KEY_STATE_MOVE, attack.move().id().toString());
+            tag.putInt(KEY_STATE_TICK, activeState.tick());
+            tag.putLong(KEY_FRAMES_FIRED, attack.timelineBitmap());
+            tag.putLong(KEY_FRAMES_DIGEST, attack.move().framesDigest());
+        }
         if (this.arena != null) {
             CompoundTag arenaTag = new CompoundTag();
             this.arena.save(arenaTag);
@@ -1708,6 +1793,20 @@ public abstract class ColossusBossEntity extends Monster {
                         this.getBossId(), overdue, malformed, this.workQueue.size());
             }
         }
+        if (!this.level().isClientSide && tag.contains(KEY_STATE_MOVE, net.minecraft.nbt.Tag.TAG_STRING)
+                && tag.contains(KEY_STATE_TICK, net.minecraft.nbt.Tag.TAG_ANY_NUMERIC)
+                && tag.contains(KEY_FRAMES_FIRED, net.minecraft.nbt.Tag.TAG_ANY_NUMERIC)
+                && tag.contains(KEY_FRAMES_DIGEST, net.minecraft.nbt.Tag.TAG_ANY_NUMERIC)) {
+            // <b>四键齐才认</b>：少任何一个都没有"能不能续"的完整答案，而 {@code getInt/getLong}
+            // 对类型不对的键回 0——只看第一个键在不在，位图就会静默读成 0＝"整招一帧没打"，
+            // 重载后把已经落过的伤害帧<b>再落一遍</b>。存在性判据用 99（与读取端同调）。
+            this.resumeAttackPending = true;
+            this.pendingMoveName = tag.getString(KEY_STATE_MOVE);
+            this.pendingStateTick = tag.getInt(KEY_STATE_TICK);
+            this.pendingFramesFired = tag.getLong(KEY_FRAMES_FIRED);
+            this.pendingFramesDigest = tag.getLong(KEY_FRAMES_DIGEST);
+        }
+
         if (tag.contains("colossus_shield", net.minecraft.nbt.Tag.TAG_FLOAT)
                 && !this.level().isClientSide) {
             this.setShield(tag.getFloat("colossus_shield"));
